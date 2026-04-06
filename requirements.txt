@@ -1,0 +1,23 @@
+# Wind Farm Layout Optimization — Temat 2
+# =========================================
+# pip install -r requirements.txt
+
+# Core
+floris>=4.4          # NREL FLORIS — wake modeling & optimization
+numpy>=2.0
+pandas>=2.0
+scipy>=1.12
+matplotlib>=3.8
+
+# ERA5 data (opcjonalne — zainstaluj gdy potrzebne)
+# cdsapi             # pip install cdsapi
+# xarray             # pip install xarray
+# netcdf4            # pip install netcdf4
+
+# Streamlit (Etap 2 — frontend)
+# streamlit>=1.30    # pip install streamlit
+# plotly>=5.18       # pip install plotly
+
+# Development
+jupyter>=1.0
+ipykernel>=6.0
