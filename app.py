@@ -1,9 +1,13 @@
 """
-Wind Farm Layout Optimization — Streamlit Dashboard v2
+Wind Farm Layout Optimization — Streamlit Dashboard v3
 =======================================================
 Temat 2 — Lokalizacja i rozmieszczenie farm wiatrowych
 
-Wyniki zapisywane w session_state — nie znikają po kliknięciu.
+Nowe w v3:
+    - Custom turbiny (formularz → YAML → TURBINE_LIBRARY)
+    - Turbiny pływające (IEA 15MW Floating + parametry fal)
+    - Generowanie raportu PDF
+    - Wizualizacja 3D (Plotly)
 
 Uruchomienie:
     cd wind_farm_project
@@ -26,15 +30,23 @@ warnings.filterwarnings("ignore")
 
 sys.path.insert(0, ".")
 from src.wind_data import WindDataLoader, BalticWindConfig
-from src.farm_model import FarmModel, WAKE_MODELS, TURBINE_LIBRARY
+from src.farm_model import (
+    FarmModel, WAKE_MODELS, TURBINE_LIBRARY, FLOATING_TURBINES,
+    register_custom_turbine, load_custom_turbines_from_dir,
+    generate_power_curve,
+)
 from src.optimizer import Optimizer
 from src.aep_calculator import AEPCalculator
+from src.report_generator import ReportGenerator
 
 import floris
 from floris.utilities import load_yaml
 import floris.layout_visualization as layoutviz
 
 FLORIS_DIR = Path(floris.__file__).parent
+
+# Załaduj custom turbiny z data/turbines/ przy starcie
+load_custom_turbines_from_dir()
 
 
 # =====================================================================
@@ -95,10 +107,21 @@ with st.sidebar:
         options=list(TURBINE_LIBRARY.keys()),
         index=2,
         format_func=lambda x: (
-            f"{TURBINE_LIBRARY[x]['name']} (D={TURBINE_LIBRARY[x]['diameter']}m)"
+            f"{TURBINE_LIBRARY[x]['name']} (D={TURBINE_LIBRARY[x]['diameter']:.0f}m)"
+            + (" 🌊" if TURBINE_LIBRARY[x].get("floating") else "")
+            + (" ⭐" if TURBINE_LIBRARY[x].get("custom_yaml") else "")
         ),
     )
     turbine_info = TURBINE_LIBRARY[turbine_name]
+    is_floating = turbine_name in FLOATING_TURBINES or turbine_info.get("floating", False)
+
+    # Floating — parametry fal
+    wave_period = 2.0
+    wave_height = 1.0
+    if is_floating:
+        st.caption("🌊 Turbina pływająca — parametry fal")
+        wave_period = st.select_slider("Okres fali Tp [s]", options=[2, 4], value=2)
+        wave_height = st.select_slider("Wysokość fali Hs [m]", options=[1, 5], value=1)
 
     st.header("Model wake")
     wake_model = st.selectbox(
@@ -170,7 +193,13 @@ wd_step = 30.0 if "30" in wr_resolution else (5.0 if "5" in wr_resolution else 1
 ws_step = 3.0 if "30" in wr_resolution else (1.0 if "5" in wr_resolution else 2.0)
 wind_rose = loader.to_wind_rose(wd_step=wd_step, ws_step=ws_step)
 
-farm = FarmModel(wake_model=wake_model, turbine=turbine_name, wind_data=wind_rose)
+farm = FarmModel(
+    wake_model=wake_model,
+    turbine=turbine_name,
+    wind_data=wind_rose,
+    wave_period=wave_period,
+    wave_height=wave_height,
+)
 
 if layout_type == "grid":
     farm.set_layout_grid(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D)
@@ -189,9 +218,11 @@ cf = aep / (rated_total * 8.76) * 100 if rated_total > 0 else 0
 # =====================================================================
 # TABS
 # =====================================================================
-tab_overview, tab_wind, tab_flow, tab_compare, tab_optimize, tab_aep, tab_export = st.tabs([
+(tab_overview, tab_wind, tab_flow, tab_compare, tab_optimize,
+ tab_aep, tab_turbines, tab_3d, tab_report, tab_export) = st.tabs([
     "📊 Przegląd", "🌬️ Wiatr", "🌊 Flow field",
-    "⚖️ Porównania", "🎯 Optymalizacja", "⚡ AEP", "📁 Eksport",
+    "⚖️ Porównania", "🎯 Optymalizacja", "⚡ AEP",
+    "🔧 Turbiny", "🌐 3D", "📄 Raport", "📁 Eksport",
 ])
 
 
@@ -206,6 +237,9 @@ with tab_overview:
     col2.metric("Moc zainstalowana", f"{rated_total:.0f} MW")
     col3.metric("AEP", f"{aep:.1f} GWh")
     col4.metric("Capacity Factor", f"{cf:.1f}%")
+
+    if is_floating:
+        st.info(f"🌊 Turbina pływająca — Tp={wave_period}s, Hs={wave_height}m")
 
     col_layout, col_info = st.columns([2, 1])
 
@@ -231,14 +265,19 @@ with tab_overview:
         st.subheader("Parametry")
         params = {
             "Turbina": turbine_info["name"],
-            "Średnica": f"{turbine_info['diameter']} m",
-            "Hub height": f"{turbine_info['hub_height']} m",
+            "Średnica": f"{turbine_info['diameter']:.0f} m",
+            "Hub height": f"{turbine_info['hub_height']:.0f} m",
             "Moc znamionowa": f"{turbine_info['rated_power']} MW",
             "Model wake": wake_model.upper(),
             "Layout": layout_type,
             "Rozstaw": f"{spacing_D}D = {spacing_D * turbine_info['diameter']:.0f} m",
             "Liczba turbin": farm.n_turbines,
         }
+        if is_floating:
+            params["Typ"] = "🌊 Pływająca"
+            params["Fale"] = f"Tp={wave_period}s, Hs={wave_height}m"
+        if turbine_info.get("custom_yaml"):
+            params["Źródło"] = "⭐ Custom YAML"
         for k, v in params.items():
             st.write(f"**{k}:** {v}")
 
@@ -365,9 +404,12 @@ with tab_compare:
         show_stored_fig("fig_wake_cmp")
 
     elif compare_type == "Turbiny":
+        # Filtruj non-floating turbiny do porównania (floating wymaga rebuild)
+        comparable = [k for k in TURBINE_LIBRARY.keys()
+                      if k not in FLOATING_TURBINES and not TURBINE_LIBRARY[k].get("floating")]
         turbines_to_compare = st.multiselect(
-            "Wybierz turbiny", list(TURBINE_LIBRARY.keys()),
-            default=list(TURBINE_LIBRARY.keys()),
+            "Wybierz turbiny", comparable,
+            default=[k for k in ["nrel_5MW", "iea_10MW", "iea_15MW", "iea_22MW"] if k in comparable],
             format_func=lambda x: TURBINE_LIBRARY[x]["name"],
         )
         if st.button("Porównaj turbiny", key="cmp_turb"):
@@ -598,7 +640,454 @@ with tab_aep:
 
 
 # =====================================================================
-# TAB 7: EKSPORT
+# TAB 7: TURBINY — Custom + Floating
+# =====================================================================
+with tab_turbines:
+    st.header("🔧 Zarządzanie turbinami")
+
+    turb_action = st.radio(
+        "Akcja",
+        ["Dodaj własną turbinę", "Podgląd biblioteki", "Podgląd krzywej mocy"],
+        horizontal=True,
+    )
+
+    if turb_action == "Dodaj własną turbinę":
+        st.subheader("Formularz nowej turbiny")
+        st.caption(
+            "Wypełnij parametry → wygenerujemy realistyczną krzywą mocy i Ct → "
+            "plik YAML zostanie zapisany w `data/turbines/` i dodany do listy w sidebarze."
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            ct_name = st.text_input("Nazwa (bez spacji)", value="my_turbine_8MW")
+            ct_power = st.number_input("Moc znamionowa [MW]", 1.0, 30.0, 8.0, 0.5)
+            ct_diameter = st.number_input("Średnica rotora [m]", 50.0, 350.0, 180.0, 5.0)
+            ct_hub = st.number_input("Hub height [m]", 50.0, 250.0, 120.0, 5.0)
+        with col2:
+            ct_cutin = st.number_input("Cut-in [m/s]", 2.0, 6.0, 3.0, 0.5)
+            ct_rated = st.number_input("Rated speed [m/s]", 8.0, 16.0, 11.0, 0.5)
+            ct_cutout = st.number_input("Cut-out [m/s]", 20.0, 35.0, 25.0, 1.0)
+            ct_tsr = st.number_input("TSR", 4.0, 12.0, 8.0, 0.5)
+
+        # Podgląd krzywej mocy
+        if st.button("👀 Podgląd krzywej mocy", key="preview_curve"):
+            ws, pw, ct_vals = generate_power_curve(
+                rated_power_kw=ct_power * 1000,
+                rotor_diameter=ct_diameter,
+                cut_in=ct_cutin,
+                rated_speed=ct_rated,
+                cut_out=ct_cutout,
+            )
+
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+            ax1.plot(ws, np.array(pw) / 1000, "o-", color="#1e5c3a", markersize=3)
+            ax1.set_xlabel("Prędkość wiatru [m/s]")
+            ax1.set_ylabel("Moc [MW]")
+            ax1.set_title(f"Krzywa mocy — {ct_name}")
+            ax1.grid(True, alpha=0.3)
+            ax1.axhline(ct_power, color="#c8531a", linestyle="--", alpha=0.5, label=f"Rated: {ct_power} MW")
+            ax1.legend()
+
+            ax2.plot(ws, ct_vals, "s-", color="#534AB7", markersize=3)
+            ax2.set_xlabel("Prędkość wiatru [m/s]")
+            ax2.set_ylabel("Ct [-]")
+            ax2.set_title("Współczynnik ciągu")
+            ax2.grid(True, alpha=0.3)
+
+            fig.tight_layout()
+            st.session_state["fig_custom_curve"] = fig_to_bytes(fig)
+
+        show_stored_fig("fig_custom_curve")
+
+        if st.button("💾 Zapisz turbinę", key="save_turbine"):
+            try:
+                key = register_custom_turbine(
+                    name=ct_name,
+                    rated_power_mw=ct_power,
+                    rotor_diameter=ct_diameter,
+                    hub_height=ct_hub,
+                    cut_in=ct_cutin,
+                    rated_speed=ct_rated,
+                    cut_out=ct_cutout,
+                    tsr=ct_tsr,
+                )
+                st.success(
+                    f"Turbina **{ct_name}** zapisana jako `data/turbines/{ct_name}.yaml` "
+                    f"i dodana do biblioteki jako **{key}**. "
+                    f"Odśwież stronę (F5) żeby zobaczyć ją w sidebarze."
+                )
+            except Exception as e:
+                st.error(f"Błąd: {e}")
+
+    elif turb_action == "Podgląd biblioteki":
+        st.subheader("Biblioteka turbin")
+        lib_data = []
+        for key, info in TURBINE_LIBRARY.items():
+            lib_data.append({
+                "ID": key,
+                "Nazwa": info["name"],
+                "D [m]": info["diameter"],
+                "Hub [m]": info["hub_height"],
+                "MW": info["rated_power"],
+                "Floating": "🌊" if info.get("floating") else "",
+                "Custom": "⭐" if info.get("custom_yaml") else "",
+            })
+        st.dataframe(pd.DataFrame(lib_data), use_container_width=True, hide_index=True)
+
+    elif turb_action == "Podgląd krzywej mocy":
+        st.subheader("Krzywa mocy aktualnej turbiny")
+        st.caption(f"Turbina: **{turbine_info['name']}**")
+
+        if st.button("📈 Pokaż krzywą mocy", key="show_power_curve"):
+            with st.spinner("Obliczam..."):
+                # Symuluj jedną turbinę przy różnych prędkościach
+                single_farm = FarmModel(
+                    wake_model=wake_model, turbine=turbine_name,
+                    wave_period=wave_period, wave_height=wave_height,
+                )
+                ws_range = np.arange(3.0, 26.0, 0.5)
+                powers = []
+                for ws in ws_range:
+                    single_farm.fmodel.set(
+                        wind_directions=[270.0],
+                        wind_speeds=[float(ws)],
+                        turbulence_intensities=[0.06],
+                    )
+                    single_farm.fmodel.run()
+                    p = single_farm.fmodel.get_turbine_powers() / 1e6  # MW
+                    powers.append(float(p.flatten()[0]))
+
+                fig, ax = plt.subplots(figsize=(10, 5))
+                ax.plot(ws_range, powers, "o-", color="#1e5c3a", markersize=3, linewidth=2)
+                ax.set_xlabel("Prędkość wiatru [m/s]")
+                ax.set_ylabel("Moc [MW]")
+                ax.set_title(f"Krzywa mocy — {turbine_info['name']}")
+                ax.axhline(turbine_info["rated_power"], color="#c8531a",
+                           linestyle="--", alpha=0.5, label=f"Rated: {turbine_info['rated_power']} MW")
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                st.session_state["fig_power_curve"] = fig_to_bytes(fig)
+
+        show_stored_fig("fig_power_curve")
+
+
+# =====================================================================
+# TAB 8: 3D VISUALIZATION (Plotly)
+# =====================================================================
+with tab_3d:
+    st.header("🌐 Wizualizacja 3D")
+
+    viz_type = st.radio(
+        "Typ wizualizacji",
+        ["Layout 3D", "Profil wiatru 3D", "Mapa mocy 3D"],
+        horizontal=True,
+    )
+
+    if viz_type == "Layout 3D":
+        st.caption("Widok 3D rozmieszczenia turbin z proporcjonalnymi rotorami.")
+
+        if st.button("🌐 Generuj widok 3D", key="gen_3d_layout"):
+            try:
+                import plotly.graph_objects as go
+
+                x = farm.layout_x
+                y = farm.layout_y
+                D = turbine_info["diameter"]
+                hh = turbine_info["hub_height"]
+
+                fig3d = go.Figure()
+
+                # Wieże (linie pionowe)
+                for i in range(len(x)):
+                    fig3d.add_trace(go.Scatter3d(
+                        x=[x[i], x[i]], y=[y[i], y[i]], z=[0, hh],
+                        mode="lines",
+                        line=dict(color="#888888", width=4),
+                        showlegend=False,
+                        hoverinfo="skip",
+                    ))
+
+                # Hub points
+                fig3d.add_trace(go.Scatter3d(
+                    x=x, y=y, z=np.full_like(x, hh),
+                    mode="markers+text",
+                    marker=dict(size=8, color="#1e5c3a", symbol="circle"),
+                    text=[f"T{i}" for i in range(len(x))],
+                    textposition="top center",
+                    textfont=dict(size=9),
+                    name="Turbiny",
+                    hovertemplate="Turbina %{text}<br>X: %{x:.0f}m<br>Y: %{y:.0f}m<extra></extra>",
+                ))
+
+                # Koła rotorów (przybliżone)
+                theta = np.linspace(0, 2 * np.pi, 36)
+                for i in range(len(x)):
+                    rx = x[i] + np.zeros_like(theta)
+                    ry = y[i] + (D / 2) * np.cos(theta)
+                    rz = hh + (D / 2) * np.sin(theta)
+                    fig3d.add_trace(go.Scatter3d(
+                        x=rx, y=ry, z=rz,
+                        mode="lines",
+                        line=dict(color="#1e5c3a", width=2),
+                        showlegend=False,
+                        hoverinfo="skip",
+                    ))
+
+                # Podłoże (morze)
+                x_range = [x.min() - 2 * D, x.max() + 2 * D]
+                y_range = [y.min() - 2 * D, y.max() + 2 * D]
+                fig3d.add_trace(go.Mesh3d(
+                    x=[x_range[0], x_range[1], x_range[1], x_range[0]],
+                    y=[y_range[0], y_range[0], y_range[1], y_range[1]],
+                    z=[0, 0, 0, 0],
+                    i=[0, 0], j=[1, 2], k=[2, 3],
+                    color="#1a5276",
+                    opacity=0.3,
+                    name="Morze",
+                    hoverinfo="skip",
+                ))
+
+                fig3d.update_layout(
+                    scene=dict(
+                        xaxis_title="X [m]",
+                        yaxis_title="Y [m]",
+                        zaxis_title="Z [m]",
+                        aspectmode="data",
+                        camera=dict(
+                            eye=dict(x=1.5, y=1.5, z=0.8),
+                        ),
+                    ),
+                    title=f"Farma 3D — {turbine_info['name']} | {farm.n_turbines} turbin",
+                    height=700,
+                    margin=dict(l=0, r=0, t=40, b=0),
+                )
+
+                st.session_state["fig_3d_layout"] = fig3d
+
+            except ImportError:
+                st.error("Plotly nie jest zainstalowany. Uruchom: `pip install plotly`")
+
+        if "fig_3d_layout" in st.session_state:
+            st.plotly_chart(st.session_state["fig_3d_layout"], use_container_width=True)
+
+    elif viz_type == "Profil wiatru 3D":
+        st.caption("Rozkład prędkości wiatru w 3D — surface plot.")
+
+        col1, col2 = st.columns(2)
+        wd_3d = col1.slider("Kierunek [°]", 0.0, 350.0, 240.0, 10.0, key="wd_3d")
+        ws_3d = col2.slider("Prędkość [m/s]", 5.0, 15.0, 9.0, 0.5, key="ws_3d")
+
+        if st.button("🌐 Generuj profil 3D", key="gen_3d_wind"):
+            try:
+                import plotly.graph_objects as go
+
+                # Oblicz flow field
+                farm.fmodel.set(
+                    wind_directions=[wd_3d],
+                    wind_speeds=[ws_3d],
+                    turbulence_intensities=[0.06],
+                )
+
+                D = turbine_info["diameter"]
+                x_bounds = (
+                    float(farm.layout_x.min() - 2 * D),
+                    float(farm.layout_x.max() + 12 * D),
+                )
+                y_bounds = (
+                    float(farm.layout_y.min() - 2 * D),
+                    float(farm.layout_y.max() + 2 * D),
+                )
+
+                hp = farm.fmodel.calculate_horizontal_plane(
+                    height=turbine_info["hub_height"],
+                    x_resolution=50,
+                    y_resolution=25,
+                    x_bounds=x_bounds,
+                    y_bounds=y_bounds,
+                )
+
+                df_flow = hp.df
+                x_unique = np.sort(df_flow["x1"].unique())
+                y_unique = np.sort(df_flow["x2"].unique())
+                u_col = "u" if "u" in df_flow.columns else df_flow.columns[-1]
+
+                Z = df_flow.pivot_table(values=u_col, index="x2", columns="x1").values
+
+                fig3d = go.Figure(data=[
+                    go.Surface(
+                        x=x_unique,
+                        y=y_unique,
+                        z=Z,
+                        colorscale="RdYlGn",
+                        colorbar=dict(title="m/s"),
+                        opacity=0.9,
+                    ),
+                ])
+
+                # Pozycje turbin
+                fig3d.add_trace(go.Scatter3d(
+                    x=farm.layout_x,
+                    y=farm.layout_y,
+                    z=np.full(farm.n_turbines, float(np.nanmax(Z)) + 0.5),
+                    mode="markers",
+                    marker=dict(size=6, color="#1e5c3a", symbol="diamond"),
+                    name="Turbiny",
+                ))
+
+                fig3d.update_layout(
+                    title=f"Profil wiatru 3D — WD={wd_3d}° WS={ws_3d} m/s",
+                    scene=dict(
+                        xaxis_title="X [m]",
+                        yaxis_title="Y [m]",
+                        zaxis_title="Prędkość [m/s]",
+                        camera=dict(eye=dict(x=1.2, y=-1.5, z=0.8)),
+                    ),
+                    height=700,
+                    margin=dict(l=0, r=0, t=40, b=0),
+                )
+
+                st.session_state["fig_3d_wind"] = fig3d
+
+                # Przywróć
+                farm.set_wind_data(wind_rose)
+
+            except ImportError:
+                st.error("Plotly nie jest zainstalowany.")
+            except Exception as e:
+                st.error(f"Błąd: {e}")
+
+        if "fig_3d_wind" in st.session_state:
+            st.plotly_chart(st.session_state["fig_3d_wind"], use_container_width=True)
+
+    elif viz_type == "Mapa mocy 3D":
+        st.caption("Moc per turbina jako słupki 3D.")
+
+        if st.button("🌐 Generuj mapę mocy", key="gen_3d_power"):
+            try:
+                import plotly.graph_objects as go
+
+                farm.set_wind_data(wind_rose)
+                farm.run()
+                powers_per_turbine = farm.get_turbine_powers_mw()
+                mean_power = np.nanmean(powers_per_turbine, axis=0)  # średnia po warunkach
+
+                x = farm.layout_x
+                y = farm.layout_y
+                D = turbine_info["diameter"]
+
+                fig3d = go.Figure()
+
+                # Słupki mocy
+                max_p = mean_power.max()
+                bar_height_scale = turbine_info["hub_height"] * 0.8
+
+                for i in range(len(x)):
+                    h = float(mean_power[i] / max_p * bar_height_scale) if max_p > 0 else 0
+                    cv = float(mean_power[i] / max_p) if max_p > 0 else 0
+
+                    # Prosty słupek — 4 ściany
+                    w = D * 0.3
+                    fig3d.add_trace(go.Mesh3d(
+                        x=[x[i]-w, x[i]+w, x[i]+w, x[i]-w, x[i]-w, x[i]+w, x[i]+w, x[i]-w],
+                        y=[y[i]-w, y[i]-w, y[i]+w, y[i]+w, y[i]-w, y[i]-w, y[i]+w, y[i]+w],
+                        z=[0, 0, 0, 0, h, h, h, h],
+                        i=[0,0,0,0,4,4,0,1,2,3,0,1],
+                        j=[1,2,4,5,5,6,1,2,3,0,4,5],
+                        k=[2,3,5,6,6,7,4,5,6,7,3,2],
+                        color=f"rgb({int(255*(1-cv))},{int(200*cv)},{80})",
+                        opacity=0.85,
+                        showlegend=False,
+                        hovertemplate=f"T{i}: {float(mean_power[i]):.1f} MW<extra></extra>",
+                    ))
+
+                fig3d.update_layout(
+                    title=f"Średnia moc per turbina — {turbine_info['name']}",
+                    scene=dict(
+                        xaxis_title="X [m]",
+                        yaxis_title="Y [m]",
+                        zaxis_title="Moc [MW]",
+                        aspectmode="data",
+                        camera=dict(eye=dict(x=1.5, y=1.5, z=1.0)),
+                    ),
+                    height=700,
+                    margin=dict(l=0, r=0, t=40, b=0),
+                )
+
+                st.session_state["fig_3d_power"] = fig3d
+
+            except ImportError:
+                st.error("Plotly nie jest zainstalowany.")
+
+        if "fig_3d_power" in st.session_state:
+            st.plotly_chart(st.session_state["fig_3d_power"], use_container_width=True)
+
+
+# =====================================================================
+# TAB 9: RAPORT PDF
+# =====================================================================
+with tab_report:
+    st.header("📄 Generowanie raportu")
+
+    st.write(
+        "Wygeneruj profesjonalny raport PDF z aktualną konfiguracją farmy, "
+        "wykresami i tabelami. Raport zawiera: stronę tytułową, podsumowanie, "
+        "layout, dane wiatrowe, analizę AEP i flow field."
+    )
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.subheader("Zawartość raportu")
+        report_items = [
+            "Strona tytułowa z parametrami",
+            "Podsumowanie wyników (AEP, CF, wake losses)",
+            "Layout farmy (mapa + tabela współrzędnych)",
+            "Dane wiatrowe (róża wiatrów, statystyki)",
+            "Analiza AEP (sezonowa, miesięczna)",
+            "Wizualizacja flow field (wake)",
+        ]
+        for item in report_items:
+            st.write(f"• {item}")
+
+    with col2:
+        st.subheader("Parametry")
+        st.write(f"**Turbina:** {turbine_info['name']}")
+        st.write(f"**Layout:** {layout_type} @ {spacing_D}D")
+        st.write(f"**Wake model:** {wake_model.upper()}")
+        st.write(f"**Turbiny:** {farm.n_turbines}")
+        st.write(f"**AEP:** {aep:.1f} GWh")
+
+    st.divider()
+
+    if st.button("📄 Generuj raport PDF", key="gen_report", type="primary"):
+        with st.spinner("Generuję raport PDF..."):
+            try:
+                farm.set_wind_data(wind_rose)
+                farm.run()
+
+                rg = ReportGenerator(farm, loader)
+                pdf_bytes = rg.generate()
+
+                st.session_state["report_pdf"] = pdf_bytes
+                st.session_state["report_ready"] = True
+                st.success(f"Raport wygenerowany — {len(pdf_bytes) / 1024:.0f} KB")
+            except Exception as e:
+                st.error(f"Błąd generowania raportu: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+
+    if st.session_state.get("report_ready"):
+        st.download_button(
+            "⬇️ Pobierz raport PDF",
+            data=st.session_state["report_pdf"],
+            file_name=f"raport_farma_{turbine_name}_{wake_model}.pdf",
+            mime="application/pdf",
+            type="primary",
+        )
+
+
+# =====================================================================
+# TAB 10: EKSPORT
 # =====================================================================
 with tab_export:
     st.header("Eksport danych dla grupy")
@@ -645,4 +1134,6 @@ st.divider()
 st.caption(
     f"Temat 2 — Lokalizacja i rozmieszczenie farm wiatrowych | "
     f"FLORIS v{floris.__version__} | {turbine_info['name']} | {wake_model.upper()}"
+    + (f" | 🌊 Floating" if is_floating else "")
+    + f" | Dashboard v3"
 )

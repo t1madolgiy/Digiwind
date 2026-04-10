@@ -80,7 +80,228 @@ TURBINE_LIBRARY = {
     "iea_10MW": {"name": "IEA 10 MW", "diameter": 198.0, "hub_height": 119.0, "rated_power": 10.0},
     "iea_15MW": {"name": "IEA 15 MW", "diameter": 240.0, "hub_height": 150.0, "rated_power": 15.0},
     "iea_22MW": {"name": "IEA 22 MW", "diameter": 280.0, "hub_height": 170.0, "rated_power": 22.0},
+    "iea_15MW_floating": {
+        "name": "IEA 15 MW Floating",
+        "diameter": 242.24,
+        "hub_height": 150.0,
+        "rated_power": 15.0,
+        "floris_id": "iea_15MW_floating_multi_dim_cp_ct",
+        "floating": True,
+    },
 }
+
+# Turbiny pływające — wymagają multidim_conditions (fale)
+FLOATING_TURBINES = {"iea_15MW_floating"}
+
+# Ścieżka do niestandardowych turbin użytkownika
+_CUSTOM_TURBINE_DIR = Path("data/turbines")
+
+
+# ---------------------------------------------------------------------------
+# Generator krzywych mocy dla custom turbin
+# ---------------------------------------------------------------------------
+def generate_power_curve(
+    rated_power_kw: float,
+    rotor_diameter: float,
+    cut_in: float = 3.0,
+    rated_speed: float = 11.0,
+    cut_out: float = 25.0,
+    n_points: int = 50,
+) -> tuple[list, list, list]:
+    """Generuje realistyczne krzywe mocy i Ct z parametrów podstawowych.
+
+    Model: cubic growth do rated_speed, potem const do cut_out.
+    Ct: estymacja z mocy (Ct = P / (0.5 * rho * A * V^3)), max 0.9.
+
+    Args:
+        rated_power_kw: Moc znamionowa [kW].
+        rotor_diameter: Średnica rotora [m].
+        cut_in: Prędkość cut-in [m/s].
+        rated_speed: Prędkość znamionowa [m/s].
+        cut_out: Prędkość cut-out [m/s].
+        n_points: Liczba punktów na krzywej.
+
+    Returns:
+        Tuple (wind_speeds, powers_kw, thrust_coefficients).
+    """
+    rho = 1.225
+    area = np.pi * (rotor_diameter / 2) ** 2
+
+    ws = np.concatenate([
+        [0.0],
+        np.linspace(cut_in - 0.1, cut_in, 2),
+        np.linspace(cut_in + 0.5, rated_speed, n_points),
+        np.linspace(rated_speed + 0.5, cut_out, 10),
+        [cut_out + 0.1, 50.0],
+    ])
+    ws = np.unique(np.round(ws, 3))
+
+    powers = np.zeros_like(ws)
+    ct = np.zeros_like(ws)
+
+    for i, v in enumerate(ws):
+        if v < cut_in or v > cut_out:
+            powers[i] = 0.0
+            ct[i] = 0.0
+        elif v <= rated_speed:
+            # Cubic region
+            frac = ((v - cut_in) / (rated_speed - cut_in)) ** 3
+            powers[i] = rated_power_kw * frac
+            # Ct z bilansu mocy
+            p_avail = 0.5 * rho * area * v ** 3
+            if p_avail > 0:
+                cp = (powers[i] * 1000) / p_avail
+                ct[i] = min(0.9, cp / 0.4 * 0.8)  # empiryczne przybliżenie
+            else:
+                ct[i] = 0.0
+        else:
+            # Rated region
+            powers[i] = rated_power_kw
+            p_avail = 0.5 * rho * area * v ** 3
+            if p_avail > 0:
+                cp = (powers[i] * 1000) / p_avail
+                ct[i] = min(0.5, cp / 0.4 * 0.8)
+            else:
+                ct[i] = 0.0
+
+    return ws.tolist(), powers.tolist(), ct.tolist()
+
+
+def create_custom_turbine_yaml(
+    name: str,
+    rated_power_mw: float,
+    rotor_diameter: float,
+    hub_height: float,
+    cut_in: float = 3.0,
+    rated_speed: float = 11.0,
+    cut_out: float = 25.0,
+    tsr: float = 8.0,
+    save_dir: Optional[Union[str, Path]] = None,
+) -> Path:
+    """Tworzy plik YAML turbiny kompatybilny z FLORIS.
+
+    Args:
+        name: Unikalna nazwa turbiny (np. 'my_turbine_8MW').
+        rated_power_mw: Moc znamionowa [MW].
+        rotor_diameter: Średnica rotora [m].
+        hub_height: Wysokość piasty [m].
+        cut_in: Prędkość cut-in [m/s].
+        rated_speed: Prędkość znamionowa [m/s].
+        cut_out: Prędkość cut-out [m/s].
+        tsr: Tip-speed ratio.
+        save_dir: Katalog do zapisu. Domyślnie data/turbines/.
+
+    Returns:
+        Ścieżka do zapisanego pliku YAML.
+    """
+    import yaml
+
+    if save_dir is None:
+        save_dir = _CUSTOM_TURBINE_DIR
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    ws, power, ct = generate_power_curve(
+        rated_power_kw=rated_power_mw * 1000,
+        rotor_diameter=rotor_diameter,
+        cut_in=cut_in,
+        rated_speed=rated_speed,
+        cut_out=cut_out,
+    )
+
+    turbine_dict = {
+        "turbine_type": name,
+        "hub_height": float(hub_height),
+        "rotor_diameter": float(rotor_diameter),
+        "TSR": float(tsr),
+        "operation_model": "cosine-loss",
+        "power_thrust_table": {
+            "ref_air_density": 1.225,
+            "ref_tilt": 5.0,
+            "cosine_loss_exponent_tilt": 1.88,
+            "cosine_loss_exponent_yaw": 1.88,
+            "wind_speed": ws,
+            "power": power,
+            "thrust_coefficient": ct,
+        },
+    }
+
+    filepath = save_dir / f"{name}.yaml"
+    with open(filepath, "w") as f:
+        yaml.dump(turbine_dict, f, default_flow_style=False, sort_keys=False)
+
+    logger.info(f"Custom turbine saved: {filepath}")
+    return filepath
+
+
+def register_custom_turbine(
+    name: str,
+    rated_power_mw: float,
+    rotor_diameter: float,
+    hub_height: float,
+    **kwargs,
+) -> str:
+    """Tworzy YAML i rejestruje turbinę w TURBINE_LIBRARY.
+
+    Returns:
+        Klucz w TURBINE_LIBRARY.
+    """
+    filepath = create_custom_turbine_yaml(
+        name=name,
+        rated_power_mw=rated_power_mw,
+        rotor_diameter=rotor_diameter,
+        hub_height=hub_height,
+        **kwargs,
+    )
+
+    key = name.lower().replace(" ", "_").replace("-", "_")
+    TURBINE_LIBRARY[key] = {
+        "name": f"{name} ({rated_power_mw:.1f} MW)",
+        "diameter": rotor_diameter,
+        "hub_height": hub_height,
+        "rated_power": rated_power_mw,
+        "custom_yaml": str(filepath),
+    }
+
+    logger.info(f"Registered custom turbine: {key}")
+    return key
+
+
+def load_custom_turbines_from_dir(directory: Union[str, Path] = None) -> int:
+    """Ładuje wszystkie custom turbiny z katalogu do TURBINE_LIBRARY.
+
+    Returns:
+        Liczba załadowanych turbin.
+    """
+    import yaml
+
+    if directory is None:
+        directory = _CUSTOM_TURBINE_DIR
+    directory = Path(directory)
+
+    if not directory.exists():
+        return 0
+
+    count = 0
+    for filepath in directory.glob("*.yaml"):
+        try:
+            with open(filepath) as f:
+                t = yaml.safe_load(f)
+            key = filepath.stem
+            if key not in TURBINE_LIBRARY:
+                rated_kw = max(t.get("power_thrust_table", {}).get("power", [0]))
+                TURBINE_LIBRARY[key] = {
+                    "name": f"{t['turbine_type']} ({rated_kw/1000:.1f} MW)",
+                    "diameter": t["rotor_diameter"],
+                    "hub_height": t["hub_height"],
+                    "rated_power": rated_kw / 1000,
+                    "custom_yaml": str(filepath),
+                }
+                count += 1
+        except Exception as e:
+            logger.warning(f"Nie udało się załadować {filepath}: {e}")
+
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -117,13 +338,18 @@ class FarmModel:
         wake_model: str = "gch",
         turbine: str = "iea_15MW",
         wind_data: Optional[Union[WindRose, TimeSeries]] = None,
+        wave_period: float = 2.0,
+        wave_height: float = 1.0,
     ):
         """
         Args:
             wake_model: Nazwa modelu wake. Dostępne: jensen, gch, turbopark,
                         empirical_gauss, cc.
-            turbine: Nazwa turbiny. Dostępne: nrel_5MW, iea_10MW, iea_15MW, iea_22MW.
+            turbine: Nazwa turbiny. Dostępne: nrel_5MW, iea_10MW, iea_15MW,
+                      iea_22MW, iea_15MW_floating + custom.
             wind_data: Opcjonalne dane wiatrowe (WindRose lub TimeSeries).
+            wave_period: Okres fali [s] — tylko dla turbin pływających (Tp=2 lub 4).
+            wave_height: Wysokość fali [m] — tylko dla turbin pływających (Hs=1 lub 5).
         """
         if wake_model not in WAKE_MODELS:
             available = ", ".join(WAKE_MODELS.keys())
@@ -136,6 +362,10 @@ class FarmModel:
         self.wake_model_name = wake_model
         self.turbine_name = turbine
         self.turbine_info = TURBINE_LIBRARY[turbine]
+
+        # Parametry fal (floating)
+        self._wave_period = wave_period
+        self._wave_height = wave_height
 
         # Layout — domyślnie pusta (1 turbina)
         self._layout_x = np.array([0.0])
@@ -153,6 +383,7 @@ class FarmModel:
         logger.info(
             f"FarmModel: wake={wake_model}, turbina={turbine} "
             f"({self.turbine_info['name']}, D={self.D}m)"
+            + (f", floating Tp={wave_period}s Hs={wave_height}m" if self.is_floating else "")
         )
 
     # ------------------------------------------------------------------
@@ -188,6 +419,11 @@ class FarmModel:
         """Dostęp do surowego FlorisModel (do zaawansowanych operacji)."""
         return self._fmodel
 
+    @property
+    def is_floating(self) -> bool:
+        """Czy turbina jest pływająca."""
+        return self.turbine_name in FLOATING_TURBINES or self.turbine_info.get("floating", False)
+
     # ------------------------------------------------------------------
     # Budowanie modelu FLORIS
     # ------------------------------------------------------------------
@@ -220,11 +456,36 @@ class FarmModel:
         input_dict["wake"]["wake_deflection_parameters"] = {defl_model: {}}
         input_dict["wake"]["wake_turbulence_parameters"] = {turb_model: {}}
 
-        # Ustaw turbinę
-        input_dict["farm"]["turbine_type"] = [turbine]
+        # Ustaw turbinę — obsługa floating i custom
+        t_info = TURBINE_LIBRARY[turbine]
+
+        if "custom_yaml" in t_info:
+            # Custom turbina — ładuj z pliku YAML użytkownika
+            import yaml as _yaml
+            custom_path = Path(t_info["custom_yaml"])
+            if custom_path.exists():
+                with open(custom_path) as f:
+                    custom_turbine = _yaml.safe_load(f)
+                input_dict["farm"]["turbine_type"] = [custom_turbine]
+            else:
+                logger.warning(f"Custom YAML nie istnieje: {custom_path}, fallback na iea_15MW")
+                input_dict["farm"]["turbine_type"] = ["iea_15MW"]
+        elif "floris_id" in t_info:
+            # Turbina z wbudowanej biblioteki FLORIS pod inną nazwą
+            input_dict["farm"]["turbine_type"] = [t_info["floris_id"]]
+        else:
+            # Standardowa turbina
+            input_dict["farm"]["turbine_type"] = [turbine]
 
         # Ustaw reference_wind_height na hub height turbiny
-        input_dict["flow_field"]["reference_wind_height"] = TURBINE_LIBRARY[turbine]["hub_height"]
+        input_dict["flow_field"]["reference_wind_height"] = t_info["hub_height"]
+
+        # Floating — dodaj multidim_conditions (parametry fal)
+        if turbine in FLOATING_TURBINES or t_info.get("floating", False):
+            input_dict["flow_field"]["multidim_conditions"] = {
+                "Tp": self._wave_period,
+                "Hs": self._wave_height,
+            }
 
         # Stwórz model ze słownika (nie z pliku)
         fmodel = FlorisModel(input_dict)
@@ -259,7 +520,8 @@ class FarmModel:
         przeliczenie layoutu.
 
         Args:
-            turbine: Nowa turbina (nrel_5MW, iea_10MW, iea_15MW, iea_22MW).
+            turbine: Nowa turbina (nrel_5MW, iea_10MW, iea_15MW, iea_22MW,
+                      iea_15MW_floating + custom).
         """
         if turbine not in TURBINE_LIBRARY:
             available = ", ".join(TURBINE_LIBRARY.keys())
@@ -272,6 +534,23 @@ class FarmModel:
         if self._wind_data is not None:
             self._fmodel.set(wind_data=self._wind_data)
         logger.info(f"Zmieniono turbinę na: {turbine} ({self.turbine_info['name']})")
+
+    def set_wave_conditions(self, wave_period: float, wave_height: float) -> None:
+        """Zmienia parametry fal (tylko dla turbin pływających).
+
+        Args:
+            wave_period: Okres fali Tp [s] (dostępne: 2, 4).
+            wave_height: Wysokość fali Hs [m] (dostępne: 1, 5).
+        """
+        self._wave_period = wave_period
+        self._wave_height = wave_height
+
+        if self.is_floating:
+            self._fmodel = self._build_floris_model(self.wake_model_name, self.turbine_name)
+            self._apply_current_layout()
+            if self._wind_data is not None:
+                self._fmodel.set(wind_data=self._wind_data)
+            logger.info(f"Wave conditions: Tp={wave_period}s, Hs={wave_height}m")
 
     # ------------------------------------------------------------------
     # Generatory layoutów
@@ -544,15 +823,15 @@ class FarmModel:
             turbulence_intensities=[ti],
         )
 
-        # Automatyczne granice z zapasem
+        # Automatyczne granice z zapasem — symetryczne dla dowolnego kierunku
         if x_bounds is None:
-            margin = 3 * self.D
+            margin = 8 * self.D
             x_bounds = (
                 float(self._layout_x.min() - margin),
-                float(self._layout_x.max() + 15 * self.D),
+                float(self._layout_x.max() + margin),
             )
         if y_bounds is None:
-            margin = 3 * self.D
+            margin = 8 * self.D
             y_bounds = (
                 float(self._layout_y.min() - margin),
                 float(self._layout_y.max() + margin),
