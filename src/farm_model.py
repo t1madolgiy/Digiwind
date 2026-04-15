@@ -661,6 +661,82 @@ class FarmModel:
             f"{n_rings} pierścień(i), promień {radius_D}D"
         )
 
+    def set_layout_parallelogram(
+        self,
+        n_turbines: int = 25,
+        r1_D: float = 7.0,
+        r2_D: float = 7.0,
+        theta1_deg: float = 90.0,
+        theta2_deg: float = 18.0,
+    ) -> None:
+        """Układ oparty na równoległoboku (parallelogram grid).
+
+        Bazowany na Malisani et al. (2025) — "Offshore wind farm layout
+        optimization with alignment constraints", Wind Energ. Sci., 10.
+        Turbiny umieszczone na przecięciach siatki równoległoboków.
+
+        Parametry siatki: dwa wektory bazowe definiowane przez (r1, theta1)
+        i (r2, theta2), gdzie r to długość boku, theta to kąt od osi X.
+
+        Args:
+            n_turbines: Docelowa liczba turbin.
+            r1_D: Długość pierwszego boku [×D].
+            r2_D: Długość drugiego boku [×D].
+            theta1_deg: Kąt pierwszego wektora [°] od osi X.
+            theta2_deg: Kąt drugiego wektora [°] od osi X.
+        """
+        r1 = r1_D * self.D
+        r2 = r2_D * self.D
+        t1 = np.radians(theta1_deg)
+        t2 = np.radians(theta2_deg)
+
+        # Wektory bazowe
+        v1 = np.array([r1 * np.cos(t1), r1 * np.sin(t1)])
+        v2 = np.array([r2 * np.cos(t2), r2 * np.sin(t2)])
+
+        # Generuj wystarczająco dużo punktów na siatce
+        n_side = int(np.ceil(np.sqrt(n_turbines))) + 2
+        xs, ys = [], []
+        for i in range(-1, n_side + 1):
+            for j in range(-1, n_side + 1):
+                pos = i * v1 + j * v2
+                xs.append(pos[0])
+                ys.append(pos[1])
+
+        xs = np.array(xs)
+        ys = np.array(ys)
+
+        # Przesuń tak żeby minimum to (0, 0)
+        xs -= xs.min()
+        ys -= ys.min()
+
+        # Sortuj po odległości od centrum (żeby brać najbliższe)
+        cx, cy = xs.mean(), ys.mean()
+        dists = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
+        order = np.argsort(dists)
+
+        # Weź n_turbines najbliższych centrum
+        idx = order[:n_turbines]
+        xs = xs[idx]
+        ys = ys[idx]
+
+        # Normalizuj — minimum na (0, 0)
+        xs -= xs.min()
+        ys -= ys.min()
+
+        self._layout_x = xs
+        self._layout_y = ys
+        self._layout_type = (
+            f"parallelogram {n_turbines}T, "
+            f"r1={r1_D}D r2={r2_D}D θ1={theta1_deg}° θ2={theta2_deg}°"
+        )
+        self._apply_current_layout()
+
+        logger.info(
+            f"Layout parallelogram: {n_turbines} turbin, "
+            f"r1={r1_D}D r2={r2_D}D θ1={theta1_deg}° θ2={theta2_deg}°"
+        )
+
     def set_layout_custom(
         self,
         x: np.ndarray,
@@ -749,9 +825,16 @@ class FarmModel:
 
         Porównuje AEP farmy z AEP bez wake (no-wake baseline).
         Baseline = n_turbin × AEP jednej turbiny bez interakcji wake.
+        Wynik jest cache'owany — resetowany przy zmianie turbiny/wake modelu.
         """
         if self._wind_data is None:
             raise RuntimeError("Brak danych wiatrowych — użyj set_wind_data() najpierw.")
+
+        # Cache key
+        cache_key = f"{self.wake_model_name}_{self.turbine_name}_{self.n_turbines}"
+        if hasattr(self, "_wl_cache_key") and self._wl_cache_key == cache_key:
+            if hasattr(self, "_wl_cache_val"):
+                return self._wl_cache_val
 
         # AEP z wake
         self._fmodel.set(wind_data=self._wind_data)
@@ -776,7 +859,13 @@ class FarmModel:
         if aep_no_wake == 0:
             return 0.0
 
-        return (1.0 - aep_wake / aep_no_wake) * 100.0
+        result = (1.0 - aep_wake / aep_no_wake) * 100.0
+
+        # Save to cache
+        self._wl_cache_key = cache_key
+        self._wl_cache_val = result
+
+        return result
 
     # ------------------------------------------------------------------
     # Wizualizacja — Flow Field
@@ -793,12 +882,13 @@ class FarmModel:
         title: Optional[str] = None,
         show_rotors: bool = True,
         show_labels: bool = True,
-        figsize: tuple = (14, 6),
+        show_wind_arrow: bool = True,
+        figsize: tuple = None,
     ) -> plt.Figure:
         """Rysuje mapę cieplną pola przepływu (horizontal cut plane).
 
         Args:
-            wind_direction: Kierunek wiatru [°].
+            wind_direction: Kierunek wiatru [°] (meteorologiczny: 270=zachód).
             wind_speed: Prędkość wiatru [m/s].
             ti: Intensywność turbulencji.
             height: Wysokość cięcia [m]. Domyślnie hub_height.
@@ -808,7 +898,8 @@ class FarmModel:
             title: Tytuł wykresu.
             show_rotors: Czy rysować rotory turbin.
             show_labels: Czy rysować numery turbin.
-            figsize: Rozmiar figury.
+            show_wind_arrow: Czy rysować strzałkę kierunku wiatru.
+            figsize: Rozmiar figury. Domyślnie dynamiczny z proporcji farmy.
 
         Returns:
             matplotlib Figure.
@@ -823,19 +914,45 @@ class FarmModel:
             turbulence_intensities=[ti],
         )
 
-        # Automatyczne granice z zapasem — symetryczne dla dowolnego kierunku
-        if x_bounds is None:
-            margin = 8 * self.D
+        # Bounds — FLORIS obraca farmę, więc potrzebujemy duży margines
+        # downstream (w kierunku wiatru) i mniejszy crosswind
+        if x_bounds is None or y_bounds is None:
+            # Margines: 3D upstream, 12D downstream, 5D crosswind
+            margin_up = 3 * self.D
+            margin_down = 12 * self.D
+            margin_cross = 5 * self.D
+
+            # Wektor wiatru (FLORIS: 270° = zachód = wiatr w prawo na osi X)
+            wd_rad = np.radians(270.0 - wind_direction)
+            wind_dx = np.cos(wd_rad)
+            wind_dy = np.sin(wd_rad)
+
+            # Oblicz potrzebne bounds na podstawie turbin + kierunku
+            cx = (self._layout_x.min() + self._layout_x.max()) / 2
+            cy = (self._layout_y.min() + self._layout_y.max()) / 2
+            farm_radius = max(
+                self._layout_x.max() - self._layout_x.min(),
+                self._layout_y.max() - self._layout_y.min(),
+            ) / 2 + self.D
+
+            # Prostokąt obejmujący farmę + asymetryczny margines
             x_bounds = (
-                float(self._layout_x.min() - margin),
-                float(self._layout_x.max() + margin),
+                float(cx - farm_radius - margin_up - abs(wind_dx) * margin_down),
+                float(cx + farm_radius + margin_up + abs(wind_dx) * margin_down),
             )
-        if y_bounds is None:
-            margin = 8 * self.D
             y_bounds = (
-                float(self._layout_y.min() - margin),
-                float(self._layout_y.max() + margin),
+                float(cy - farm_radius - margin_cross - abs(wind_dy) * margin_down),
+                float(cy + farm_radius + margin_cross + abs(wind_dy) * margin_down),
             )
+
+        # Dynamiczny figsize z proporcji
+        if figsize is None:
+            x_span = x_bounds[1] - x_bounds[0]
+            y_span = y_bounds[1] - y_bounds[0]
+            ratio = y_span / x_span if x_span > 0 else 1.0
+            fig_w = 12
+            fig_h = max(4, min(12, fig_w * ratio))
+            figsize = (fig_w, fig_h)
 
         # Oblicz pole przepływu
         horizontal_plane = self._fmodel.calculate_horizontal_plane(
@@ -868,6 +985,35 @@ class FarmModel:
             layoutviz.plot_turbine_rotors(self._fmodel, ax=ax)
         if show_labels:
             layoutviz.plot_turbine_labels(self._fmodel, ax=ax)
+
+        # Strzałka kierunku wiatru
+        if show_wind_arrow:
+            wd_rad = np.radians(270.0 - wind_direction)
+            arrow_len = 3 * self.D
+            # Pozycja strzałki — lewy górny róg
+            ax_xlim = ax.get_xlim()
+            ax_ylim = ax.get_ylim()
+            arrow_x = ax_xlim[0] + (ax_xlim[1] - ax_xlim[0]) * 0.08
+            arrow_y = ax_ylim[1] - (ax_ylim[1] - ax_ylim[0]) * 0.10
+            dx = arrow_len * np.cos(wd_rad)
+            dy = arrow_len * np.sin(wd_rad)
+            ax.annotate(
+                "", xy=(arrow_x + dx, arrow_y + dy),
+                xytext=(arrow_x, arrow_y),
+                arrowprops=dict(
+                    arrowstyle="->,head_width=0.4,head_length=0.3",
+                    color="white", lw=2.5,
+                ),
+                zorder=10,
+            )
+            ax.text(
+                arrow_x + dx * 0.5, arrow_y + dy * 0.5 + arrow_len * 0.3,
+                f"Wiatr {wind_direction}°",
+                color="white", fontsize=9, fontweight="bold",
+                ha="center", va="bottom",
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="black", alpha=0.5),
+                zorder=10,
+            )
 
         return fig
 

@@ -134,11 +134,12 @@ with st.sidebar:
     st.header("Layout farmy")
     layout_type = st.selectbox(
         "Typ layoutu",
-        options=["grid", "staggered", "circular"],
+        options=["grid", "staggered", "circular", "parallelogram"],
         format_func=lambda x: {
             "grid": "Siatka regularna",
             "staggered": "Siatka przesunięta",
             "circular": "Kołowy",
+            "parallelogram": "Równoległobok (Malisani 2025)",
         }[x],
     )
 
@@ -161,6 +162,18 @@ with st.sidebar:
         n_rings = st.number_input("Pierścienie", 1, 3, 2)
     else:
         n_ring_turbines, n_rings = 12, 2
+
+    # Parallelogram params (Malisani et al. 2025)
+    if layout_type == "parallelogram":
+        st.caption("Parametryzacja wg Malisani et al. (2025)")
+        para_n = st.number_input("Liczba turbin", 4, 100, 25, key="para_n")
+        col_p1, col_p2 = st.columns(2)
+        para_r1 = col_p1.slider("r₁ [×D]", 2.0, 10.0, 7.0, 0.5, key="para_r1")
+        para_r2 = col_p2.slider("r₂ [×D]", 2.0, 10.0, 7.0, 0.5, key="para_r2")
+        para_t1 = col_p1.slider("θ₁ [°]", -89, 89, 88, 1, key="para_t1")
+        para_t2 = col_p2.slider("θ₂ [°]", -89, 89, 18, 1, key="para_t2")
+    else:
+        para_n, para_r1, para_r2, para_t1, para_t2 = 25, 7.0, 7.0, 90, 18
 
     st.header("Dane wiatrowe")
     weibull_A = st.slider("Weibull A [m/s]", 6.0, 14.0, 9.5, 0.5)
@@ -207,6 +220,11 @@ elif layout_type == "staggered":
     farm.set_layout_staggered(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D, offset=stagger_offset)
 elif layout_type == "circular":
     farm.set_layout_circular(n_turbines=n_ring_turbines, radius_D=spacing_D, n_rings=n_rings)
+elif layout_type == "parallelogram":
+    farm.set_layout_parallelogram(
+        n_turbines=para_n, r1_D=para_r1, r2_D=para_r2,
+        theta1_deg=float(para_t1), theta2_deg=float(para_t2),
+    )
 
 farm.set_wind_data(wind_rose)
 farm.run()
@@ -214,15 +232,27 @@ aep = farm.get_aep_gwh()
 rated_total = turbine_info["rated_power"] * farm.n_turbines
 cf = aep / (rated_total * 8.76) * 100 if rated_total > 0 else 0
 
+# --- Config key do czyszczenia session_state ---
+_config_key = f"{turbine_name}_{wake_model}_{layout_type}_{spacing_D}_{n_rows}_{n_cols}_{weibull_A}_{weibull_k}"
+if st.session_state.get("_prev_config") != _config_key:
+    # Konfiguracja się zmieniła — wyczyść stare wyniki
+    keys_to_clear = [k for k in st.session_state.keys()
+                     if k.startswith("fig_") or k.startswith("df_") or k.startswith("txt_")
+                     or k in ("opt_result", "opt_final_aep", "yaw_result", "yaw_error",
+                              "ed_results", "report_pdf", "report_ready")]
+    for k in keys_to_clear:
+        del st.session_state[k]
+    st.session_state["_prev_config"] = _config_key
+
 
 # =====================================================================
 # TABS
 # =====================================================================
-(tab_overview, tab_wind, tab_flow, tab_compare, tab_optimize,
- tab_aep, tab_turbines, tab_3d, tab_report, tab_export) = st.tabs([
+(tab_overview, tab_wind, tab_flow, tab_compare, tab_benchmark, tab_optimize,
+ tab_aep, tab_turbines, tab_editor, tab_3d, tab_report, tab_export) = st.tabs([
     "📊 Przegląd", "🌬️ Wiatr", "🌊 Flow field",
-    "⚖️ Porównania", "🎯 Optymalizacja", "⚡ AEP",
-    "🔧 Turbiny", "🌐 3D", "📄 Raport", "📁 Eksport",
+    "⚖️ Porównania", "🏆 Benchmark", "🎯 Optymalizacja", "⚡ AEP",
+    "🔧 Turbiny", "✏️ Edytor", "🌐 3D", "📄 Raport", "📁 Eksport",
 ])
 
 
@@ -423,6 +453,8 @@ with tab_compare:
                     farm.set_layout_grid(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D)
                 elif layout_type == "staggered":
                     farm.set_layout_staggered(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D, offset=stagger_offset)
+                elif layout_type == "parallelogram":
+                    farm.set_layout_parallelogram(n_turbines=para_n, r1_D=para_r1, r2_D=para_r2, theta1_deg=float(para_t1), theta2_deg=float(para_t2))
                 farm.set_wind_data(wind_rose)
 
                 rows = [v for v in results.values() if "error" not in v]
@@ -467,6 +499,8 @@ with tab_compare:
                     farm.set_layout_grid(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D)
                 elif layout_type == "staggered":
                     farm.set_layout_staggered(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D, offset=stagger_offset)
+                elif layout_type == "parallelogram":
+                    farm.set_layout_parallelogram(n_turbines=para_n, r1_D=para_r1, r2_D=para_r2, theta1_deg=float(para_t1), theta2_deg=float(para_t2))
                 farm.set_wind_data(wind_rose)
 
         show_stored_fig("fig_spacing")
@@ -475,7 +509,368 @@ with tab_compare:
 
 
 # =====================================================================
-# TAB 5: OPTYMALIZACJA
+# TAB 5: BENCHMARK — ALL-IN-ONE
+# =====================================================================
+with tab_benchmark:
+    st.header("🏆 Benchmark — porównanie konfiguracji")
+    st.caption(
+        "Porównanie wielu konfiguracji naraz: modele wake × layouty × spacing. "
+        "Parametry wiatru ustawiasz tutaj (niezależnie od sidebara)."
+    )
+
+    # --- Kontrolki na górze ---
+    col_bw1, col_bw2, col_bw3, col_bw4 = st.columns(4)
+    bm_weibull_A = col_bw1.slider("Weibull A [m/s]", 6.0, 14.0, 9.5, 0.5, key="bm_wa")
+    bm_weibull_k = col_bw2.slider("Weibull k", 1.5, 3.0, 2.1, 0.1, key="bm_wk")
+    bm_n_turb = col_bw3.number_input("Turbin (siatka)", 4, 100, 25, key="bm_nt")
+    bm_turbine = col_bw4.selectbox(
+        "Turbina",
+        [k for k in TURBINE_LIBRARY.keys() if k not in FLOATING_TURBINES],
+        index=2,
+        format_func=lambda x: TURBINE_LIBRARY[x]["name"],
+        key="bm_turb",
+    )
+
+    st.divider()
+
+    col_bm_left, col_bm_right = st.columns(2)
+
+    with col_bm_left:
+        bm_models = st.multiselect(
+            "Modele wake",
+            list(WAKE_MODELS.keys()),
+            default=["jensen", "gch", "cc"],
+            format_func=lambda x: x.upper(),
+            key="bm_models",
+        )
+    with col_bm_right:
+        bm_layouts = st.multiselect(
+            "Layouty",
+            ["grid", "staggered", "parallelogram"],
+            default=["grid", "staggered"],
+            format_func=lambda x: {"grid": "Siatka", "staggered": "Przesunięta", "parallelogram": "Równoległobok"}[x],
+            key="bm_layouts",
+        )
+
+    bm_spacings = st.slider("Zakres spacing [×D]", 4.0, 12.0, (5.0, 9.0), 1.0, key="bm_sp")
+
+    if st.button("🏆 Uruchom benchmark", key="run_benchmark", type="primary"):
+        with st.spinner("Benchmark w toku..."):
+            # Wygeneruj dane wiatrowe dla benchmarku
+            bm_config = BalticWindConfig(weibull_A=bm_weibull_A, weibull_k=bm_weibull_k)
+            bm_loader = WindDataLoader()
+            bm_loader.generate_mock_data(config=bm_config, seed=42)
+            bm_wr = bm_loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
+
+            D_bm = TURBINE_LIBRARY[bm_turbine]["diameter"]
+            n_bm = bm_n_turb
+            n_c = int(np.ceil(np.sqrt(n_bm)))
+            n_r = int(np.ceil(n_bm / n_c))
+
+            spacings_list = np.arange(bm_spacings[0], bm_spacings[1] + 1.0, 1.0)
+
+            results = []
+            total_runs = len(bm_models) * len(bm_layouts) * len(spacings_list)
+            progress = st.progress(0)
+            run_i = 0
+
+            for wake_m in bm_models:
+                for layout_t in bm_layouts:
+                    for sp in spacings_list:
+                        try:
+                            f = FarmModel(wake_model=wake_m, turbine=bm_turbine)
+
+                            if layout_t == "grid":
+                                f.set_layout_grid(n_rows=n_r, n_cols=n_c, spacing_D=sp)
+                            elif layout_t == "staggered":
+                                f.set_layout_staggered(n_rows=n_r, n_cols=n_c, spacing_D=sp, offset=0.5)
+                            elif layout_t == "parallelogram":
+                                f.set_layout_parallelogram(n_turbines=n_bm, r1_D=sp, r2_D=sp,
+                                                           theta1_deg=88.0, theta2_deg=18.0)
+
+                            f.set_wind_data(bm_wr)
+                            f.run()
+                            a = f.get_aep_gwh()
+                            wl = f.get_wake_losses_percent()
+
+                            rated = TURBINE_LIBRARY[bm_turbine]["rated_power"] * f.n_turbines
+                            cf_val = a / (rated * 8.76) * 100 if rated > 0 else 0
+
+                            results.append({
+                                "Wake model": wake_m.upper(),
+                                "Layout": layout_t,
+                                "Spacing [×D]": sp,
+                                "Turbin": f.n_turbines,
+                                "AEP [GWh]": round(a, 1),
+                                "Wake losses [%]": round(wl, 1),
+                                "CF [%]": round(cf_val, 1),
+                            })
+                        except Exception as e:
+                            results.append({
+                                "Wake model": wake_m.upper(),
+                                "Layout": layout_t,
+                                "Spacing [×D]": sp,
+                                "Turbin": "?",
+                                "AEP [GWh]": f"ERR: {str(e)[:30]}",
+                                "Wake losses [%]": "-",
+                                "CF [%]": "-",
+                            })
+
+                        run_i += 1
+                        progress.progress(run_i / total_runs)
+
+            progress.empty()
+            bm_df = pd.DataFrame(results)
+            st.session_state["bm_results"] = bm_df
+
+            # Wykres
+            try:
+                numeric_df = bm_df[bm_df["AEP [GWh]"].apply(lambda x: isinstance(x, (int, float)))].copy()
+                if len(numeric_df) > 0:
+                    fig_bm, axes_bm = plt.subplots(1, 2, figsize=(14, 6))
+
+                    # AEP per konfiguracja
+                    labels = numeric_df.apply(
+                        lambda r: f"{r['Wake model']}\n{r['Layout']}\n{r['Spacing [×D]']}D", axis=1
+                    )
+                    colors_bm = []
+                    cmap = plt.cm.Set2(np.linspace(0, 1, len(bm_models)))
+                    model_color = {m.upper(): cmap[i] for i, m in enumerate(bm_models)}
+                    for _, r in numeric_df.iterrows():
+                        colors_bm.append(model_color.get(r["Wake model"], "#888888"))
+
+                    axes_bm[0].barh(range(len(numeric_df)), numeric_df["AEP [GWh]"],
+                                    color=colors_bm, edgecolor="white", linewidth=0.5)
+                    axes_bm[0].set_yticks(range(len(numeric_df)))
+                    axes_bm[0].set_yticklabels(labels, fontsize=7)
+                    axes_bm[0].set_xlabel("AEP [GWh]")
+                    axes_bm[0].set_title("AEP per konfiguracja")
+                    axes_bm[0].grid(True, alpha=0.3, axis="x")
+
+                    # Wake losses
+                    wl_vals = numeric_df["Wake losses [%]"].astype(float)
+                    axes_bm[1].barh(range(len(numeric_df)), wl_vals,
+                                    color=colors_bm, edgecolor="white", linewidth=0.5)
+                    axes_bm[1].set_yticks(range(len(numeric_df)))
+                    axes_bm[1].set_yticklabels(labels, fontsize=7)
+                    axes_bm[1].set_xlabel("Wake losses [%]")
+                    axes_bm[1].set_title("Straty wake")
+                    axes_bm[1].grid(True, alpha=0.3, axis="x")
+
+                    fig_bm.suptitle(
+                        f"Benchmark — {TURBINE_LIBRARY[bm_turbine]['name']} | "
+                        f"Weibull A={bm_weibull_A} k={bm_weibull_k}",
+                        fontsize=13,
+                    )
+                    fig_bm.tight_layout()
+                    st.session_state["fig_benchmark"] = fig_to_bytes(fig_bm)
+            except Exception:
+                pass
+
+    # Wyświetl wyniki
+    if "bm_results" in st.session_state:
+        bm_df = st.session_state["bm_results"]
+
+        # Najlepsza konfiguracja
+        try:
+            numeric_df = bm_df[bm_df["AEP [GWh]"].apply(lambda x: isinstance(x, (int, float)))].copy()
+            if len(numeric_df) > 0:
+                best_idx = numeric_df["AEP [GWh]"].astype(float).idxmax()
+                best = numeric_df.loc[best_idx]
+                st.success(
+                    f"🏆 **Najlepsza konfiguracja:** {best['Wake model']} | "
+                    f"{best['Layout']} @ {best['Spacing [×D]']}D → "
+                    f"**AEP = {best['AEP [GWh]']} GWh** | "
+                    f"Wake losses = {best['Wake losses [%]']}%"
+                )
+        except Exception:
+            pass
+
+        st.dataframe(bm_df, use_container_width=True, hide_index=True)
+        show_stored_fig("fig_benchmark")
+
+        st.download_button(
+            "⬇️ Pobierz benchmark CSV",
+            bm_df.to_csv(index=False),
+            file_name="benchmark_results.csv", mime="text/csv",
+        )
+
+    # --- Wizualizacja flow field obok siebie ---
+    st.divider()
+    st.subheader("🌊 Porównanie wake — flow field")
+    st.caption(
+        "Wizualizacja pola przepływu dla wybranych konfiguracji obok siebie. "
+        "Używa tych samych parametrów wiatru co benchmark powyżej."
+    )
+
+    col_ff1, col_ff2, col_ff3 = st.columns(3)
+    ff_bm_wd = col_ff1.slider("Kierunek wiatru [°]", 0.0, 350.0, 240.0, 10.0, key="ff_bm_wd")
+    ff_bm_ws = col_ff2.slider("Prędkość [m/s]", 3.0, 20.0, 9.0, 0.5, key="ff_bm_ws")
+    ff_bm_sp = col_ff3.slider("Spacing [×D]", 4.0, 12.0, 7.0, 0.5, key="ff_bm_sp")
+
+    col_ff4, col_ff5 = st.columns(2)
+    ff_bm_models = col_ff4.multiselect(
+        "Modele wake do porównania",
+        list(WAKE_MODELS.keys()),
+        default=["jensen", "gch", "turbopark", "cc"],
+        format_func=lambda x: x.upper(),
+        key="ff_bm_models",
+    )
+    ff_bm_layout = col_ff5.selectbox(
+        "Layout",
+        ["grid", "staggered", "parallelogram"],
+        format_func=lambda x: {"grid": "Siatka", "staggered": "Przesunięta", "parallelogram": "Równoległobok"}[x],
+        key="ff_bm_layout",
+    )
+
+    if st.button("🌊 Generuj porównanie flow field", key="gen_ff_benchmark"):
+        if len(ff_bm_models) < 1:
+            st.warning("Wybierz co najmniej 1 model wake.")
+        else:
+            with st.spinner(f"Generuję flow field dla {len(ff_bm_models)} modeli..."):
+                n_models = len(ff_bm_models)
+                # Max 4 kolumny, potem nowe rzędy
+                n_cols_fig = min(n_models, 4)
+                n_rows_fig = int(np.ceil(n_models / n_cols_fig))
+
+                fig_ff, axes_ff = plt.subplots(
+                    n_rows_fig, n_cols_fig,
+                    figsize=(5 * n_cols_fig, 5 * n_rows_fig),
+                    squeeze=False,
+                )
+
+                # Turbina i layout
+                bm_turb_sel = st.session_state.get("bm_turb", turbine_name)
+                bm_nt_sel = st.session_state.get("bm_nt", 25)
+                D_ff = TURBINE_LIBRARY.get(bm_turb_sel, turbine_info)["diameter"]
+                n_c_ff = int(np.ceil(np.sqrt(bm_nt_sel)))
+                n_r_ff = int(np.ceil(bm_nt_sel / n_c_ff))
+
+                for idx, wm in enumerate(ff_bm_models):
+                    row_i = idx // n_cols_fig
+                    col_i = idx % n_cols_fig
+                    ax = axes_ff[row_i][col_i]
+
+                    try:
+                        f = FarmModel(wake_model=wm, turbine=bm_turb_sel)
+                        if ff_bm_layout == "grid":
+                            f.set_layout_grid(n_rows=n_r_ff, n_cols=n_c_ff, spacing_D=ff_bm_sp)
+                        elif ff_bm_layout == "staggered":
+                            f.set_layout_staggered(n_rows=n_r_ff, n_cols=n_c_ff, spacing_D=ff_bm_sp, offset=0.5)
+                        elif ff_bm_layout == "parallelogram":
+                            f.set_layout_parallelogram(
+                                n_turbines=bm_nt_sel, r1_D=ff_bm_sp, r2_D=ff_bm_sp,
+                                theta1_deg=88.0, theta2_deg=18.0,
+                            )
+
+                        f.plot_flow_field(
+                            wind_direction=ff_bm_wd,
+                            wind_speed=ff_bm_ws,
+                            ti=0.06,
+                            ax=ax,
+                            title=f"{wm.upper()}",
+                            show_labels=False,
+                            show_wind_arrow=(idx == 0),  # strzałka tylko na pierwszym
+                        )
+
+                    except Exception as e:
+                        ax.text(0.5, 0.5, f"Błąd:\n{str(e)[:60]}",
+                                transform=ax.transAxes, ha="center", va="center",
+                                fontsize=9, wrap=True)
+                        ax.set_title(f"{wm.upper()} — BŁĄD")
+
+                # Ukryj puste subploty
+                for idx in range(n_models, n_rows_fig * n_cols_fig):
+                    row_i = idx // n_cols_fig
+                    col_i = idx % n_cols_fig
+                    axes_ff[row_i][col_i].set_visible(False)
+
+                fig_ff.suptitle(
+                    f"Porównanie wake — {ff_bm_layout} @ {ff_bm_sp}D | "
+                    f"WD={ff_bm_wd}° WS={ff_bm_ws} m/s | "
+                    f"{TURBINE_LIBRARY.get(bm_turb_sel, turbine_info)['name']}",
+                    fontsize=14, fontweight="500",
+                )
+                fig_ff.tight_layout()
+                st.session_state["fig_ff_benchmark"] = fig_to_bytes(fig_ff)
+
+    show_stored_fig("fig_ff_benchmark")
+
+    # --- Porównanie layoutów przy stałym modelu wake ---
+    st.divider()
+    st.subheader("📐 Porównanie layoutów — flow field")
+
+    col_fl1, col_fl2 = st.columns(2)
+    fl_wake = col_fl1.selectbox(
+        "Model wake",
+        list(WAKE_MODELS.keys()),
+        index=1,
+        format_func=lambda x: x.upper(),
+        key="fl_wake",
+    )
+    fl_layouts = col_fl2.multiselect(
+        "Layouty do porównania",
+        ["grid", "staggered", "parallelogram"],
+        default=["grid", "staggered", "parallelogram"],
+        format_func=lambda x: {"grid": "Siatka", "staggered": "Przesunięta", "parallelogram": "Równoległobok"}[x],
+        key="fl_layouts",
+    )
+
+    if st.button("📐 Generuj porównanie layoutów", key="gen_fl_benchmark"):
+        if len(fl_layouts) < 1:
+            st.warning("Wybierz co najmniej 1 layout.")
+        else:
+            with st.spinner(f"Generuję flow field dla {len(fl_layouts)} layoutów..."):
+                n_lay = len(fl_layouts)
+                fig_fl, axes_fl = plt.subplots(1, n_lay, figsize=(5 * n_lay, 5), squeeze=False)
+
+                bm_turb_sel = st.session_state.get("bm_turb", turbine_name)
+                bm_nt_sel = st.session_state.get("bm_nt", 25)
+                n_c_fl = int(np.ceil(np.sqrt(bm_nt_sel)))
+                n_r_fl = int(np.ceil(bm_nt_sel / n_c_fl))
+
+                for idx, lay in enumerate(fl_layouts):
+                    ax = axes_fl[0][idx]
+                    try:
+                        f = FarmModel(wake_model=fl_wake, turbine=bm_turb_sel)
+                        if lay == "grid":
+                            f.set_layout_grid(n_rows=n_r_fl, n_cols=n_c_fl, spacing_D=ff_bm_sp)
+                        elif lay == "staggered":
+                            f.set_layout_staggered(n_rows=n_r_fl, n_cols=n_c_fl, spacing_D=ff_bm_sp, offset=0.5)
+                        elif lay == "parallelogram":
+                            f.set_layout_parallelogram(
+                                n_turbines=bm_nt_sel, r1_D=ff_bm_sp, r2_D=ff_bm_sp,
+                                theta1_deg=88.0, theta2_deg=18.0,
+                            )
+
+                        lay_label = {"grid": "Siatka", "staggered": "Przesunięta", "parallelogram": "Równoległobok"}[lay]
+                        f.plot_flow_field(
+                            wind_direction=ff_bm_wd,
+                            wind_speed=ff_bm_ws,
+                            ti=0.06,
+                            ax=ax,
+                            title=f"{lay_label}",
+                            show_labels=False,
+                            show_wind_arrow=(idx == 0),
+                        )
+                    except Exception as e:
+                        ax.text(0.5, 0.5, f"Błąd:\n{str(e)[:60]}",
+                                transform=ax.transAxes, ha="center", va="center",
+                                fontsize=9, wrap=True)
+
+                fig_fl.suptitle(
+                    f"Porównanie layoutów — {fl_wake.upper()} @ {ff_bm_sp}D | "
+                    f"WD={ff_bm_wd}° WS={ff_bm_ws} m/s",
+                    fontsize=14, fontweight="500",
+                )
+                fig_fl.tight_layout()
+                st.session_state["fig_fl_benchmark"] = fig_to_bytes(fig_fl)
+
+    show_stored_fig("fig_fl_benchmark")
+
+
+# =====================================================================
+# TAB 6: OPTYMALIZACJA
 # =====================================================================
 with tab_optimize:
     st.header("Optymalizacja layoutu")
@@ -773,7 +1168,240 @@ with tab_turbines:
 
 
 # =====================================================================
-# TAB 8: 3D VISUALIZATION (Plotly)
+# TAB 8: EDYTOR LAYOUTU
+# =====================================================================
+with tab_editor:
+    st.header("✏️ Edytor layoutu")
+    st.caption(
+        "Wybierz liczbę turbin i startowy układ — współrzędne wygenerują się automatycznie. "
+        "Edytuj wartości w tabeli, potem kliknij **Oblicz AEP**."
+    )
+
+    col_ctrl, col_viz = st.columns([1, 2])
+
+    with col_ctrl:
+        st.subheader("Ustawienia")
+
+        ed_n_turbines = st.number_input("Liczba turbin", 2, 100, 25, key="ed_n")
+        ed_init_layout = st.selectbox(
+            "Układ startowy",
+            ["grid", "staggered", "circular", "parallelogram"],
+            format_func=lambda x: {
+                "grid": "Siatka regularna",
+                "staggered": "Siatka przesunięta",
+                "circular": "Kołowy",
+                "parallelogram": "Równoległobok",
+            }[x],
+            key="ed_layout",
+        )
+        ed_spacing = st.slider("Rozstaw [×D]", 4.0, 15.0, 7.0, 0.5, key="ed_sp")
+
+        # Generuj współrzędne automatycznie (na podstawie ustawień)
+        D = turbine_info["diameter"]
+        n = ed_n_turbines
+
+        if ed_init_layout == "grid":
+            n_c = int(np.ceil(np.sqrt(n)))
+            n_r = int(np.ceil(n / n_c))
+            sp = ed_spacing * D
+            xg, yg = np.meshgrid(np.arange(n_c) * sp, np.arange(n_r) * sp)
+            ed_xs = xg.flatten()[:n]
+            ed_ys = yg.flatten()[:n]
+
+        elif ed_init_layout == "staggered":
+            n_c = int(np.ceil(np.sqrt(n)))
+            n_r = int(np.ceil(n / n_c))
+            sp = ed_spacing * D
+            ed_xs, ed_ys = [], []
+            for row in range(n_r):
+                for col in range(n_c):
+                    if len(ed_xs) >= n:
+                        break
+                    ed_xs.append(col * sp + (0.5 * sp if row % 2 == 1 else 0))
+                    ed_ys.append(row * sp)
+            ed_xs = np.array(ed_xs)
+            ed_ys = np.array(ed_ys)
+
+        elif ed_init_layout == "circular":
+            angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
+            r = ed_spacing * D
+            ed_xs = r * np.cos(angles)
+            ed_ys = r * np.sin(angles)
+
+        elif ed_init_layout == "parallelogram":
+            r1 = ed_spacing * D
+            r2 = ed_spacing * D
+            t1, t2 = np.radians(88), np.radians(18)
+            v1 = np.array([r1 * np.cos(t1), r1 * np.sin(t1)])
+            v2 = np.array([r2 * np.cos(t2), r2 * np.sin(t2)])
+            ns = int(np.ceil(np.sqrt(n))) + 2
+            pts_x, pts_y = [], []
+            for i in range(-1, ns + 1):
+                for j in range(-1, ns + 1):
+                    pos = i * v1 + j * v2
+                    pts_x.append(pos[0])
+                    pts_y.append(pos[1])
+            pts_x, pts_y = np.array(pts_x), np.array(pts_y)
+            pts_x -= pts_x.min()
+            pts_y -= pts_y.min()
+            cx, cy = pts_x.mean(), pts_y.mean()
+            dists = np.sqrt((pts_x - cx)**2 + (pts_y - cy)**2)
+            idx = np.argsort(dists)[:n]
+            ed_xs = pts_x[idx] - pts_x[idx].min()
+            ed_ys = pts_y[idx] - pts_y[idx].min()
+
+        # Załaduj do session_state (tylko jeśli parametry się zmieniły)
+        editor_key = f"{ed_init_layout}_{ed_n_turbines}_{ed_spacing}"
+        if st.session_state.get("_editor_key") != editor_key:
+            st.session_state["editor_df"] = pd.DataFrame({
+                "turbine_id": range(len(ed_xs)),
+                "x_m": np.round(ed_xs, 1),
+                "y_m": np.round(ed_ys, 1),
+            })
+            st.session_state["_editor_key"] = editor_key
+
+        st.divider()
+        st.subheader("Format CSV")
+        st.code("turbine_id,x_m,y_m\n0,0.0,0.0\n1,1680.0,0.0\n...", language="csv")
+
+        # Upload CSV
+        uploaded = st.file_uploader("📂 Wczytaj layout CSV", type=["csv"], key="ed_upload")
+        if uploaded is not None:
+            try:
+                up_df = pd.read_csv(uploaded)
+                if "x_m" in up_df.columns and "y_m" in up_df.columns:
+                    up_df["turbine_id"] = range(len(up_df))
+                    st.session_state["editor_df"] = up_df[["turbine_id", "x_m", "y_m"]]
+                    st.session_state["_editor_key"] = "uploaded"
+                    st.success(f"Wczytano {len(up_df)} turbin.")
+                    st.rerun()
+                else:
+                    st.error("CSV musi mieć kolumny: x_m, y_m")
+            except Exception as e:
+                st.error(f"Błąd: {e}")
+
+    with col_viz:
+        # Edytor tabeli
+        st.subheader(f"Współrzędne ({len(st.session_state.get('editor_df', []))} turbin)")
+        if "editor_df" in st.session_state:
+            edited_df = st.data_editor(
+                st.session_state["editor_df"],
+                num_rows="fixed",
+                use_container_width=True,
+                column_config={
+                    "turbine_id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
+                    "x_m": st.column_config.NumberColumn("X [m]", min_value=-50000, max_value=50000, step=10.0, format="%.1f"),
+                    "y_m": st.column_config.NumberColumn("Y [m]", min_value=-50000, max_value=50000, step=10.0, format="%.1f"),
+                },
+                key="ed_table",
+                height=300,
+            )
+            st.session_state["editor_df"] = edited_df
+
+    # Podgląd layoutu
+    st.divider()
+    col_plot, col_results = st.columns([2, 1])
+
+    with col_plot:
+        if "editor_df" in st.session_state:
+            df_ed = st.session_state["editor_df"]
+            fig_ed, ax_ed = plt.subplots(figsize=(8, 7))
+            ax_ed.scatter(df_ed["x_m"], df_ed["y_m"], s=120, c="#1e5c3a",
+                          edgecolors="white", linewidths=1.5, zorder=5)
+            for _, row in df_ed.iterrows():
+                ax_ed.annotate(str(int(row["turbine_id"])), (row["x_m"], row["y_m"]),
+                               textcoords="offset points", xytext=(8, 8),
+                               fontsize=8, color="#4a4a45")
+                ax_ed.add_patch(plt.Circle(
+                    (row["x_m"], row["y_m"]), turbine_info["diameter"] / 2,
+                    fill=False, color="#d8d5cc", linewidth=0.5, linestyle="--"))
+
+            # Minimalna odległość
+            from scipy.spatial.distance import pdist
+            coords = df_ed[["x_m", "y_m"]].values
+            if len(coords) > 1:
+                dists = pdist(coords)
+                min_dist = dists.min()
+                min_dist_D = min_dist / turbine_info["diameter"]
+                color_dist = "#c8531a" if min_dist_D < 3.0 else "#1e5c3a"
+                ax_ed.set_title(
+                    f"Edytor layoutu — {len(df_ed)} turbin | "
+                    f"Min. odl.: {min_dist_D:.1f}D ({min_dist:.0f}m)",
+                    color=color_dist,
+                )
+
+            ax_ed.set_xlabel("X [m]")
+            ax_ed.set_ylabel("Y [m]")
+            ax_ed.set_aspect("equal")
+            ax_ed.grid(True, alpha=0.3)
+            st.pyplot(fig_ed)
+            plt.close()
+
+    with col_results:
+        st.subheader("Wynik")
+
+        # Walidacja minimalnej odległości
+        ed_valid = True
+        if "editor_df" in st.session_state:
+            df_check = st.session_state["editor_df"]
+            coords_check = df_check[["x_m", "y_m"]].values
+            if len(coords_check) > 1:
+                from scipy.spatial.distance import pdist
+                dists_check = pdist(coords_check)
+                min_d = dists_check.min()
+                min_d_D = min_d / turbine_info["diameter"]
+
+                if min_d < 1.0:  # < 1 metr = nakładają się
+                    st.error(f"❌ Turbiny nachodzą na siebie! Min odl.: {min_d:.0f}m")
+                    ed_valid = False
+                elif min_d_D < 2.0:
+                    st.warning(f"⚠️ Turbiny za blisko: {min_d_D:.1f}D ({min_d:.0f}m). Min. zalecane: 3D.")
+                elif min_d_D < 3.0:
+                    st.info(f"Min. odl.: {min_d_D:.1f}D ({min_d:.0f}m) — poniżej zalecanego 3D.")
+
+        if st.button("⚡ Oblicz AEP", key="ed_calc", type="primary", disabled=not ed_valid):
+            with st.spinner("Obliczam..."):
+                df_ed = st.session_state["editor_df"]
+                ed_farm = FarmModel(
+                    wake_model=wake_model, turbine=turbine_name,
+                    wave_period=wave_period, wave_height=wave_height,
+                )
+                ed_farm.set_layout_custom(
+                    df_ed["x_m"].values, df_ed["y_m"].values, name="editor",
+                )
+                ed_farm.set_wind_data(wind_rose)
+                ed_farm.run()
+                ed_aep = ed_farm.get_aep_gwh()
+                ed_rated = turbine_info["rated_power"] * len(df_ed)
+                ed_cf = ed_aep / (ed_rated * 8.76) * 100 if ed_rated > 0 else 0
+                try:
+                    ed_wl = ed_farm.get_wake_losses_percent()
+                except Exception:
+                    ed_wl = 0.0
+
+                st.session_state["ed_results"] = {
+                    "aep": ed_aep, "cf": ed_cf, "wl": ed_wl,
+                    "n": len(df_ed), "mw": ed_rated,
+                }
+
+        if "ed_results" in st.session_state:
+            r = st.session_state["ed_results"]
+            st.metric("AEP", f"{r['aep']:.1f} GWh")
+            st.metric("Capacity Factor", f"{r['cf']:.1f}%")
+            st.metric("Wake Losses", f"{r['wl']:.1f}%")
+            st.metric("Moc zainstalowana", f"{r['mw']:.0f} MW")
+
+        st.divider()
+        if "editor_df" in st.session_state:
+            st.download_button(
+                "⬇️ Pobierz layout CSV",
+                st.session_state["editor_df"].to_csv(index=False),
+                file_name="custom_layout.csv", mime="text/csv",
+            )
+
+
+# =====================================================================
+# TAB 9: 3D VISUALIZATION (Plotly)
 # =====================================================================
 with tab_3d:
     st.header("🌐 Wizualizacja 3D")
@@ -872,7 +1500,7 @@ with tab_3d:
             st.plotly_chart(st.session_state["fig_3d_layout"], use_container_width=True)
 
     elif viz_type == "Profil wiatru 3D":
-        st.caption("Rozkład prędkości wiatru w 3D — surface plot.")
+        st.caption("Rozkład prędkości wiatru w 3D — heatmap z wysokością = prędkość.")
 
         col1, col2 = st.columns(2)
         wd_3d = col1.slider("Kierunek [°]", 0.0, 350.0, 240.0, 10.0, key="wd_3d")
@@ -882,7 +1510,6 @@ with tab_3d:
             try:
                 import plotly.graph_objects as go
 
-                # Oblicz flow field
                 farm.fmodel.set(
                     wind_directions=[wd_3d],
                     wind_speeds=[ws_3d],
@@ -891,57 +1518,74 @@ with tab_3d:
 
                 D = turbine_info["diameter"]
                 x_bounds = (
-                    float(farm.layout_x.min() - 2 * D),
-                    float(farm.layout_x.max() + 12 * D),
+                    float(farm.layout_x.min() - 3 * D),
+                    float(farm.layout_x.max() + 8 * D),
                 )
                 y_bounds = (
-                    float(farm.layout_y.min() - 2 * D),
-                    float(farm.layout_y.max() + 2 * D),
+                    float(farm.layout_y.min() - 3 * D),
+                    float(farm.layout_y.max() + 3 * D),
                 )
 
                 hp = farm.fmodel.calculate_horizontal_plane(
                     height=turbine_info["hub_height"],
-                    x_resolution=50,
-                    y_resolution=25,
+                    x_resolution=80,
+                    y_resolution=40,
                     x_bounds=x_bounds,
                     y_bounds=y_bounds,
                 )
 
                 df_flow = hp.df
-                x_unique = np.sort(df_flow["x1"].unique())
-                y_unique = np.sort(df_flow["x2"].unique())
                 u_col = "u" if "u" in df_flow.columns else df_flow.columns[-1]
 
-                Z = df_flow.pivot_table(values=u_col, index="x2", columns="x1").values
+                # Zamień NaN/inf
+                df_flow[u_col] = df_flow[u_col].replace([np.inf, -np.inf], np.nan)
+                df_flow[u_col] = df_flow[u_col].fillna(df_flow[u_col].median())
 
-                fig3d = go.Figure(data=[
-                    go.Surface(
-                        x=x_unique,
-                        y=y_unique,
-                        z=Z,
-                        colorscale="RdYlGn",
-                        colorbar=dict(title="m/s"),
-                        opacity=0.9,
-                    ),
-                ])
+                # Pivot do 2D grid
+                Z = df_flow.pivot_table(
+                    values=u_col, index="x2", columns="x1",
+                    aggfunc="mean",
+                ).values
+                x_unique = np.sort(df_flow["x1"].unique())
+                y_unique = np.sort(df_flow["x2"].unique())
 
-                # Pozycje turbin
+                # Wypełnij ewentualne NaN w Z
+                Z = np.nan_to_num(Z, nan=float(np.nanmedian(Z)))
+
+                fig3d = go.Figure()
+
+                fig3d.add_trace(go.Surface(
+                    x=x_unique,
+                    y=y_unique,
+                    z=Z,
+                    colorscale="RdYlGn",
+                    colorbar=dict(title="m/s", len=0.6),
+                    opacity=0.92,
+                    name="Prędkość",
+                    hovertemplate="X: %{x:.0f}m<br>Y: %{y:.0f}m<br>V: %{z:.2f} m/s<extra></extra>",
+                ))
+
+                # Turbiny jako markery na surface
                 fig3d.add_trace(go.Scatter3d(
                     x=farm.layout_x,
                     y=farm.layout_y,
-                    z=np.full(farm.n_turbines, float(np.nanmax(Z)) + 0.5),
-                    mode="markers",
-                    marker=dict(size=6, color="#1e5c3a", symbol="diamond"),
+                    z=np.full(farm.n_turbines, float(np.nanmax(Z)) * 1.02),
+                    mode="markers+text",
+                    marker=dict(size=5, color="#c8531a", symbol="diamond"),
+                    text=[f"T{i}" for i in range(farm.n_turbines)],
+                    textposition="top center",
+                    textfont=dict(size=8),
                     name="Turbiny",
                 ))
 
                 fig3d.update_layout(
-                    title=f"Profil wiatru 3D — WD={wd_3d}° WS={ws_3d} m/s",
+                    title=f"Profil wiatru 3D — WD={wd_3d}° WS={ws_3d} m/s | {wake_model.upper()}",
                     scene=dict(
                         xaxis_title="X [m]",
                         yaxis_title="Y [m]",
                         zaxis_title="Prędkość [m/s]",
-                        camera=dict(eye=dict(x=1.2, y=-1.5, z=0.8)),
+                        camera=dict(eye=dict(x=1.5, y=-1.2, z=0.7)),
+                        zaxis=dict(range=[float(np.nanmin(Z)) * 0.95, float(np.nanmax(Z)) * 1.05]),
                     ),
                     height=700,
                     margin=dict(l=0, r=0, t=40, b=0),
@@ -949,19 +1593,20 @@ with tab_3d:
 
                 st.session_state["fig_3d_wind"] = fig3d
 
-                # Przywróć
                 farm.set_wind_data(wind_rose)
 
             except ImportError:
                 st.error("Plotly nie jest zainstalowany.")
             except Exception as e:
                 st.error(f"Błąd: {e}")
+                import traceback
+                st.code(traceback.format_exc())
 
         if "fig_3d_wind" in st.session_state:
             st.plotly_chart(st.session_state["fig_3d_wind"], use_container_width=True)
 
     elif viz_type == "Mapa mocy 3D":
-        st.caption("Moc per turbina jako słupki 3D.")
+        st.caption("Średnia moc per turbina jako słupki 3D na mapie farmy.")
 
         if st.button("🌐 Generuj mapę mocy", key="gen_3d_power"):
             try:
@@ -970,35 +1615,59 @@ with tab_3d:
                 farm.set_wind_data(wind_rose)
                 farm.run()
                 powers_per_turbine = farm.get_turbine_powers_mw()
-                mean_power = np.nanmean(powers_per_turbine, axis=0)  # średnia po warunkach
+                # Bezpieczna konwersja — flatten na 1D
+                mean_power = np.nanmean(powers_per_turbine, axis=0).flatten()
 
-                x = farm.layout_x
-                y = farm.layout_y
+                x = farm.layout_x.flatten()
+                y = farm.layout_y.flatten()
                 D = turbine_info["diameter"]
+
+                max_p = float(np.nanmax(mean_power))
+                bar_h_scale = float(turbine_info["hub_height"]) * 0.8
 
                 fig3d = go.Figure()
 
-                # Słupki mocy
-                max_p = mean_power.max()
-                bar_height_scale = turbine_info["hub_height"] * 0.8
-
+                # Słupki mocy z go.Bar3d nie istnieje — użyj Scatter3d z markerami
+                colors_power = []
+                heights = []
                 for i in range(len(x)):
-                    h = float(mean_power[i] / max_p * bar_height_scale) if max_p > 0 else 0
-                    cv = float(mean_power[i] / max_p) if max_p > 0 else 0
+                    p = float(mean_power[i])
+                    cv = p / max_p if max_p > 0 else 0
+                    colors_power.append(cv)
+                    heights.append(p)
 
-                    # Prosty słupek — 4 ściany
-                    w = D * 0.3
-                    fig3d.add_trace(go.Mesh3d(
-                        x=[x[i]-w, x[i]+w, x[i]+w, x[i]-w, x[i]-w, x[i]+w, x[i]+w, x[i]-w],
-                        y=[y[i]-w, y[i]-w, y[i]+w, y[i]+w, y[i]-w, y[i]-w, y[i]+w, y[i]+w],
-                        z=[0, 0, 0, 0, h, h, h, h],
-                        i=[0,0,0,0,4,4,0,1,2,3,0,1],
-                        j=[1,2,4,5,5,6,1,2,3,0,4,5],
-                        k=[2,3,5,6,6,7,4,5,6,7,3,2],
-                        color=f"rgb({int(255*(1-cv))},{int(200*cv)},{80})",
-                        opacity=0.85,
+                # Scatter3d — rozmiar = moc
+                fig3d.add_trace(go.Scatter3d(
+                    x=x, y=y, z=[0.0] * len(x),
+                    mode="markers+text",
+                    marker=dict(
+                        size=[max(6, h / max_p * 25) if max_p > 0 else 8 for h in heights],
+                        color=heights,
+                        colorscale="RdYlGn",
+                        colorbar=dict(title="MW", len=0.6),
+                        opacity=0.9,
+                    ),
+                    text=[f"T{i}: {float(mean_power[i]):.1f} MW" for i in range(len(x))],
+                    textposition="top center",
+                    textfont=dict(size=8),
+                    name="Moc",
+                    hovertemplate="T%{text}<br>X: %{x:.0f}m<br>Y: %{y:.0f}m<extra></extra>",
+                ))
+
+                # Wieże
+                for i in range(len(x)):
+                    h_bar = float(mean_power[i]) / max_p * bar_h_scale if max_p > 0 else 0
+                    fig3d.add_trace(go.Scatter3d(
+                        x=[float(x[i]), float(x[i])],
+                        y=[float(y[i]), float(y[i])],
+                        z=[0, h_bar],
+                        mode="lines",
+                        line=dict(
+                            color=f"rgb({int(255 * (1 - float(mean_power[i]) / max_p))},{int(200 * float(mean_power[i]) / max_p)},80)" if max_p > 0 else "rgb(128,128,80)",
+                            width=8,
+                        ),
                         showlegend=False,
-                        hovertemplate=f"T{i}: {float(mean_power[i]):.1f} MW<extra></extra>",
+                        hoverinfo="skip",
                     ))
 
                 fig3d.update_layout(
@@ -1006,7 +1675,7 @@ with tab_3d:
                     scene=dict(
                         xaxis_title="X [m]",
                         yaxis_title="Y [m]",
-                        zaxis_title="Moc [MW]",
+                        zaxis_title="Moc skalowana [MW]",
                         aspectmode="data",
                         camera=dict(eye=dict(x=1.5, y=1.5, z=1.0)),
                     ),
@@ -1018,13 +1687,17 @@ with tab_3d:
 
             except ImportError:
                 st.error("Plotly nie jest zainstalowany.")
+            except Exception as e:
+                st.error(f"Błąd: {e}")
+                import traceback
+                st.code(traceback.format_exc())
 
         if "fig_3d_power" in st.session_state:
             st.plotly_chart(st.session_state["fig_3d_power"], use_container_width=True)
 
 
 # =====================================================================
-# TAB 9: RAPORT PDF
+# TAB 10: RAPORT PDF
 # =====================================================================
 with tab_report:
     st.header("📄 Generowanie raportu")
@@ -1087,7 +1760,7 @@ with tab_report:
 
 
 # =====================================================================
-# TAB 10: EKSPORT
+# TAB 11: EKSPORT
 # =====================================================================
 with tab_export:
     st.header("Eksport danych dla grupy")

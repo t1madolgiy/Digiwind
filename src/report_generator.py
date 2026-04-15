@@ -235,9 +235,16 @@ class ReportGenerator:
         story.append(PageBreak())
         self._add_summary_section(story)
         self._add_layout_section(story)
+        story.append(PageBreak())
         self._add_wind_section(story)
+        story.append(PageBreak())
         self._add_aep_section(story)
+        story.append(PageBreak())
         self._add_wake_section(story)
+        self._add_wake_comparison_section(story)
+        story.append(PageBreak())
+        self._add_turbine_power_section(story)
+        self._add_spacing_section(story)
         story.append(PageBreak())
         self._add_footer(story)
 
@@ -405,7 +412,19 @@ class ReportGenerator:
             fig = self.loader.plot_wind_rose(figsize=(6, 6))
             story.append(fig_to_image(fig, width=120 * mm))
         except Exception as e:
-            story.append(Paragraph(f"(Róża wiatrów niedostępna: {e})", s["SmallText"]))
+            story.append(Paragraph(f"(Roza wiatrow niedostepna: {e})", s["SmallText"]))
+
+        # Seria czasowa
+        try:
+            fig = self.loader.plot_time_series(figsize=(12, 7))
+            story.append(fig_to_image(fig, width=170 * mm))
+            story.append(Paragraph(
+                "Powyzszy wykres przedstawia serie czasowa predkosci i kierunku wiatru, "
+                "histogram z dopasowaniem Weibulla oraz zaleznosc TI od predkosci.",
+                s["SmallText"],
+            ))
+        except Exception as e:
+            story.append(Paragraph(f"(Seria czasowa niedostepna: {e})", s["SmallText"]))
 
     def _add_aep_section(self, story: list) -> None:
         """Sekcja analizy AEP."""
@@ -468,11 +487,167 @@ class ReportGenerator:
             )
             story.append(fig_to_image(fig, width=170 * mm))
 
+            # Drugi kierunek
+            story.append(Paragraph(
+                "Dla porownania — pole przeplywu przy wietrze z kierunku 180° (poludnie):",
+                s["ReportBody"],
+            ))
+            fig2 = self.farm.plot_flow_field(
+                wind_direction=180.0, wind_speed=9.0, ti=0.06, figsize=(12, 5),
+            )
+            story.append(fig_to_image(fig2, width=170 * mm))
+
             # Przywróć wind data
             if self.farm._wind_data is not None:
                 self.farm.fmodel.set(wind_data=self.farm._wind_data)
         except Exception as e:
             story.append(Paragraph(f"(Flow field niedostępny: {e})", s["SmallText"]))
+
+    def _add_wake_comparison_section(self, story: list) -> None:
+        """Porownanie modeli wake."""
+        s = self._styles
+
+        story.append(Paragraph("6. Porownanie modeli wake", s["SectionHeader"]))
+
+        story.append(Paragraph(
+            "Porownanie AEP i strat wake dla roznych modeli aerodynamicznych "
+            "na tym samym layoucie i danych wiatrowych. Roznice wynikaja z roznych "
+            "zalozen fizycznych kazdego modelu.",
+            s["ReportBody"],
+        ))
+
+        try:
+            from .farm_model import WAKE_MODELS, FarmModel
+            models = ["jensen", "gch", "turbopark", "cc"]
+            wake_data = [["Model", "AEP [GWh]", "Wake losses [%]"]]
+
+            original_wake = self.farm.wake_model_name
+            for m in models:
+                try:
+                    self.farm.switch_wake_model(m)
+                    if self.farm._wind_data is not None:
+                        self.farm.fmodel.set(wind_data=self.farm._wind_data)
+                    self.farm.run()
+                    a = self.farm.get_aep_gwh()
+                    wl = self.farm.get_wake_losses_percent()
+                    wake_data.append([m.upper(), f"{a:.1f}", f"{wl:.1f}"])
+                except Exception:
+                    wake_data.append([m.upper(), "N/A", "N/A"])
+
+            self.farm.switch_wake_model(original_wake)
+            if self.farm._wind_data is not None:
+                self.farm.fmodel.set(wind_data=self.farm._wind_data)
+
+            table = _make_table(wake_data, col_widths=[45 * mm, 45 * mm, 45 * mm])
+            story.append(table)
+
+        except Exception as e:
+            story.append(Paragraph(f"(Porownanie niedostepne: {e})", s["SmallText"]))
+
+    def _add_turbine_power_section(self, story: list) -> None:
+        """Moc per turbina."""
+        s = self._styles
+
+        story.append(Paragraph("7. Produkcja per turbina", s["SectionHeader"]))
+
+        story.append(Paragraph(
+            "Roczna produkcja energii (AEP) kazdej turbiny w farmie. Turbiny w srodku "
+            "farmy maja nizsza produkcje z powodu strat wake od turbin upstream.",
+            s["ReportBody"],
+        ))
+
+        try:
+            self.farm.run()
+            # Bezpieczna metoda — AEP per turbina (nie powers!)
+            aep_per_turbine = self.farm.fmodel.get_turbine_AEPs() / 1e9  # GWh
+            # Upewnij sie ze 1D
+            if aep_per_turbine.ndim > 1:
+                aep_per_turbine = np.nansum(aep_per_turbine, axis=0)
+            aep_per_turbine = aep_per_turbine.flatten()
+
+            n_turb = self.farm.n_turbines
+            # Obetnij do rzeczywistej liczby turbin
+            aep_per_turbine = aep_per_turbine[:n_turb]
+            mean_aep = float(np.nanmean(aep_per_turbine))
+
+            fig, ax = plt.subplots(figsize=(10, 4))
+            turbine_ids = np.arange(len(aep_per_turbine))
+            colors_bar = ["#1e5c3a" if a >= mean_aep else "#c8531a" for a in aep_per_turbine]
+            ax.bar(turbine_ids, aep_per_turbine, color=colors_bar, edgecolor="white", linewidth=0.5)
+            ax.axhline(mean_aep, color="#534AB7", linestyle="--",
+                       label=f"Srednia: {mean_aep:.2f} GWh")
+            ax.set_xlabel("ID turbiny")
+            ax.set_ylabel("AEP [GWh]")
+            ax.set_title(f"AEP per turbina ({n_turb} turbin)")
+            ax.legend()
+            ax.grid(True, alpha=0.3, axis="y")
+            story.append(fig_to_image(fig, width=160 * mm))
+
+        except Exception as e:
+            story.append(Paragraph(f"(Wykres AEP per turbina niedostepny: {e})", s["SmallText"]))
+
+    def _add_spacing_section(self, story: list) -> None:
+        """Analiza rozstawu."""
+        s = self._styles
+
+        story.append(Paragraph("8. Wrazliwosc na rozstaw", s["SectionHeader"]))
+
+        story.append(Paragraph(
+            "Analiza wplywu rozstawu miedzy turbinami na AEP i straty wake. "
+            "Wiekszy rozstaw zmniejsza straty wake, ale wymaga wiekszego obszaru.",
+            s["ReportBody"],
+        ))
+
+        try:
+            # Zapisz oryginalny layout
+            orig_x = self.farm.layout_x.copy()
+            orig_y = self.farm.layout_y.copy()
+            orig_type = self.farm._layout_type
+
+            spacings = np.arange(5.0, 12.5, 1.0)
+            aeps = []
+            wakes = []
+
+            n_r = int(np.ceil(np.sqrt(self.farm.n_turbines)))
+            n_c = int(np.ceil(self.farm.n_turbines / n_r))
+
+            for sp in spacings:
+                self.farm.set_layout_grid(n_rows=n_r, n_cols=n_c, spacing_D=sp)
+                if self.farm._wind_data is not None:
+                    self.farm.fmodel.set(wind_data=self.farm._wind_data)
+                self.farm.run()
+                aeps.append(self.farm.get_aep_gwh())
+                try:
+                    wakes.append(self.farm.get_wake_losses_percent())
+                except Exception:
+                    wakes.append(0)
+
+            # Przywroc oryginalny layout
+            self.farm.set_layout_custom(orig_x, orig_y, name=orig_type)
+            if self.farm._wind_data is not None:
+                self.farm.fmodel.set(wind_data=self.farm._wind_data)
+
+            fig, ax1 = plt.subplots(figsize=(8, 4))
+            ax1.plot(spacings, aeps, "o-", color="#1e5c3a", linewidth=2, label="AEP")
+            ax1.set_xlabel("Rozstaw [xD]")
+            ax1.set_ylabel("AEP [GWh]", color="#1e5c3a")
+            ax2 = ax1.twinx()
+            ax2.plot(spacings, wakes, "s--", color="#c8531a", linewidth=2, label="Wake losses")
+            ax2.set_ylabel("Wake losses [%]", color="#c8531a")
+            fig.legend(loc="upper right", bbox_to_anchor=(0.88, 0.88))
+            ax1.grid(True, alpha=0.3)
+            ax1.set_title("AEP i straty wake vs rozstaw")
+            story.append(fig_to_image(fig, width=150 * mm))
+
+            # Tabela
+            sp_data = [["Rozstaw [xD]", "AEP [GWh]", "Wake losses [%]"]]
+            for i, sp in enumerate(spacings):
+                sp_data.append([f"{sp:.1f}", f"{aeps[i]:.1f}", f"{wakes[i]:.1f}"])
+            table = _make_table(sp_data, col_widths=[40 * mm, 40 * mm, 40 * mm])
+            story.append(table)
+
+        except Exception as e:
+            story.append(Paragraph(f"(Analiza rozstawu niedostepna: {e})", s["SmallText"]))
 
     def _add_footer(self, story: list) -> None:
         """Stopka / disclaimer."""
