@@ -38,8 +38,10 @@ from src.farm_model import (
 from src.optimizer import Optimizer
 from src.aep_calculator import AEPCalculator
 from src.report_generator import ReportGenerator
+from src.algorithms import ALGORITHMS, bounds_from_layout
 
 import floris
+from floris import TimeSeries
 from floris.utilities import load_yaml
 import floris.layout_visualization as layoutviz
 
@@ -176,9 +178,38 @@ with st.sidebar:
         para_n, para_r1, para_r2, para_t1, para_t2 = 25, 7.0, 7.0, 90, 18
 
     st.header("Dane wiatrowe")
-    weibull_A = st.slider("Weibull A [m/s]", 6.0, 14.0, 9.5, 0.5)
-    weibull_k = st.slider("Weibull k", 1.5, 3.0, 2.1, 0.1)
-    n_years = st.selectbox("Lata danych", [1, 2, 3], index=0)
+    data_source = st.radio(
+        "Źródło danych",
+        ["Mock (Weibull)", "ERA5 (Copernicus)"],
+        horizontal=True,
+        help="ERA5 wymaga cdsapi+xarray+netcdf4 i klucza w ~/.cdsapirc. "
+             "Lokalizacja domyślna: Bałtyk Południowy.",
+    )
+
+    if data_source == "Mock (Weibull)":
+        weibull_A = st.slider("Weibull A [m/s]", 6.0, 14.0, 9.5, 0.5)
+        weibull_k = st.slider("Weibull k", 1.5, 3.0, 2.1, 0.1)
+        n_years = st.selectbox("Lata danych", [1, 2, 3], index=0)
+        era5_lat = 54.5
+        era5_lon = 16.5
+        era5_years = (2023,)
+        era5_hub_input = 150.0
+    else:
+        st.caption(
+            "Pobranie z Copernicus CDS. Pierwsze ściągnięcie trwa kilka minut, "
+            "kolejne są z lokalnego cache w `data/raw/`."
+        )
+        col_lat, col_lon = st.columns(2)
+        era5_lat = col_lat.number_input("Szerokość [°N]", 50.0, 60.0, 54.5, 0.1)
+        era5_lon = col_lon.number_input("Długość [°E]", 10.0, 20.0, 16.5, 0.1)
+        era5_years = tuple(sorted(st.multiselect(
+            "Lata", list(range(2015, 2025)), default=[2023],
+        )))
+        era5_hub_input = float(st.slider("Hub height [m]", 80, 200, 150, 10))
+        # Wartości "ghost" — potrzebne dalej do klucza cache i fallbacku
+        weibull_A = 9.5
+        weibull_k = 2.1
+        n_years = 1
 
     wr_resolution = st.selectbox(
         "Rozdzielczość WindRose",
@@ -200,7 +231,47 @@ def generate_wind_data(weibull_A, weibull_k, n_years):
     loader.generate_mock_data(config=config, seed=42)
     return loader
 
-loader = generate_wind_data(weibull_A, weibull_k, n_years)
+
+@st.cache_data(show_spinner="Pobieram ERA5 (może chwilę potrwać przy pierwszym uruchomieniu)...")
+def load_era5_wind(lat, lon, years_tuple, hub_height):
+    """Próbuje pobrać dane ERA5. Zwraca (loader, error_msg). Loader=None przy błędzie."""
+    try:
+        loader = WindDataLoader.from_era5(
+            latitude=float(lat),
+            longitude=float(lon),
+            years=list(years_tuple),
+            hub_height=float(hub_height),
+        )
+        return loader, None
+    except ImportError as e:
+        return None, (
+            f"Brak bibliotek do ERA5 ({e}). "
+            "Zainstaluj: `pip install cdsapi xarray netcdf4`"
+        )
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+era5_active = False
+era5_error = None
+
+if data_source == "Mock (Weibull)":
+    loader = generate_wind_data(weibull_A, weibull_k, n_years)
+elif not era5_years:
+    st.sidebar.warning("⚠️ Wybierz co najmniej jeden rok ERA5. Używam mock.")
+    loader = generate_wind_data(weibull_A, weibull_k, n_years)
+else:
+    loader, era5_error = load_era5_wind(era5_lat, era5_lon, era5_years, era5_hub_input)
+    if loader is None:
+        st.sidebar.error(f"❌ ERA5: {era5_error}\n\nUżywam mock data.")
+        loader = generate_wind_data(weibull_A, weibull_k, n_years)
+    else:
+        era5_active = True
+        st.sidebar.success(
+            f"✅ ERA5: {len(era5_years)} lat, "
+            f"{len(loader.wind_speeds)} rekordów, "
+            f"@{era5_hub_input:.0f}m"
+        )
 
 wd_step = 30.0 if "30" in wr_resolution else (5.0 if "5" in wr_resolution else 10.0)
 ws_step = 3.0 if "30" in wr_resolution else (1.0 if "5" in wr_resolution else 2.0)
@@ -233,7 +304,11 @@ rated_total = turbine_info["rated_power"] * farm.n_turbines
 cf = aep / (rated_total * 8.76) * 100 if rated_total > 0 else 0
 
 # --- Config key do czyszczenia session_state ---
-_config_key = f"{turbine_name}_{wake_model}_{layout_type}_{spacing_D}_{n_rows}_{n_cols}_{weibull_A}_{weibull_k}"
+_data_part = (
+    f"era5_{era5_lat}_{era5_lon}_{era5_years}_{era5_hub_input}"
+    if era5_active else f"mock_{weibull_A}_{weibull_k}_{n_years}"
+)
+_config_key = f"{turbine_name}_{wake_model}_{layout_type}_{spacing_D}_{n_rows}_{n_cols}_{_data_part}"
 if st.session_state.get("_prev_config") != _config_key:
     # Konfiguracja się zmieniła — wyczyść stare wyniki
     keys_to_clear = [k for k in st.session_state.keys()
@@ -249,10 +324,11 @@ if st.session_state.get("_prev_config") != _config_key:
 # TABS
 # =====================================================================
 (tab_overview, tab_wind, tab_flow, tab_compare, tab_benchmark, tab_optimize,
- tab_aep, tab_turbines, tab_editor, tab_3d, tab_report, tab_export) = st.tabs([
+ tab_lab, tab_group3, tab_aep, tab_turbines, tab_editor, tab_3d, tab_report, tab_export) = st.tabs([
     "📊 Przegląd", "🌬️ Wiatr", "🌊 Flow field",
-    "⚖️ Porównania", "🏆 Benchmark", "🎯 Optymalizacja", "⚡ AEP",
-    "🔧 Turbiny", "✏️ Edytor", "🌐 3D", "📄 Raport", "📁 Eksport",
+    "⚖️ Porównania", "🏆 Benchmark", "🎯 Optymalizacja",
+    "🧪 Lab algorytmów", "🤝 Grupa 3",
+    "⚡ AEP", "🔧 Turbiny", "✏️ Edytor", "🌐 3D", "📄 Raport", "📁 Eksport",
 ])
 
 
@@ -870,13 +946,21 @@ with tab_benchmark:
 
 
 # =====================================================================
-# TAB 6: OPTYMALIZACJA
+# TAB 6: OPTYMALIZACJA (layout) — Yaw przeniesiony do zakładki Grupa 3
 # =====================================================================
 with tab_optimize:
     st.header("Optymalizacja layoutu")
+    st.caption(
+        "Optymalizacja FLORIS dla pełnej róży wiatrów. "
+        "Do porównywania algorytmów na wąskim binie użyj zakładki **🧪 Lab algorytmów**. "
+        "Optymalizacja yaw (wake steering) jest w zakładce **🤝 Grupa 3**."
+    )
 
-    opt_method = st.radio("Metoda", ["Scipy (gradient)", "Yaw (wake steering)"],
-                          horizontal=True)
+    opt_method = st.radio(
+        "Metoda",
+        ["Scipy (gradient)", "Random Search (FLORIS)"],
+        horizontal=True,
+    )
 
     if opt_method == "Scipy (gradient)":
         opt_maxiter = st.slider("Max iteracji", 10, 100, 30, 10)
@@ -903,7 +987,6 @@ with tab_optimize:
                 fig = opt.plot_optimization_result(result)
                 st.session_state["fig_opt"] = fig_to_bytes(fig)
 
-                # Finalne AEP
                 opt.apply_result(result)
                 farm.set_wind_data(wind_rose)
                 farm.run()
@@ -919,39 +1002,655 @@ with tab_optimize:
         if "opt_final_aep" in st.session_state:
             st.info(f"AEP na dokładnej WindRose: **{st.session_state['opt_final_aep']:.1f} GWh**")
 
-    else:  # Yaw
-        if st.button("🎯 Optymalizuj kąty yaw", key="opt_yaw"):
-            with st.spinner("Optymalizacja yaw..."):
+    else:  # Random Search (FLORIS)
+        rs_seconds = st.slider("Budżet czasowy [s]", 10, 300, 60, 10)
+        rs_margin = st.slider("Margines granic [×D]", 1.0, 5.0, 3.0, 0.5, key="rs_margin")
+
+        if st.button("🎯 Optymalizuj layout (RS)", key="opt_rs"):
+            with st.spinner(f"Random Search ({rs_seconds}s)..."):
                 wr_coarse = loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
                 farm.set_wind_data(wr_coarse)
 
                 opt = Optimizer(farm)
-                opt.set_boundaries_from_layout(margin_D=3.0)
+                opt.set_boundaries_from_layout(margin_D=rs_margin)
+                opt.set_min_distance(min_dist_D=3.0)
 
                 try:
-                    result_yaw = opt.optimize_yaw()
-                    st.session_state["yaw_result"] = {
+                    result = opt.optimize_layout_random_search(seconds=rs_seconds)
+                    st.session_state["opt_rs_result"] = {
+                        "before": result.initial_aep_gwh,
+                        "after": result.optimized_aep_gwh,
+                        "pct": result.aep_improvement_pct,
+                        "time": result.elapsed_seconds,
+                    }
+                    fig = opt.plot_optimization_result(result)
+                    st.session_state["fig_opt_rs"] = fig_to_bytes(fig)
+                    opt.apply_result(result)
+                    farm.set_wind_data(wind_rose)
+                    farm.run()
+                except Exception as e:
+                    st.session_state["opt_rs_error"] = str(e)
+
+        if "opt_rs_result" in st.session_state:
+            r = st.session_state["opt_rs_result"]
+            col1, col2, col3 = st.columns(3)
+            col1.metric("AEP przed", f"{r['before']:.1f} GWh")
+            col2.metric("AEP po", f"{r['after']:.1f} GWh", f"+{r['pct']:.2f}%")
+            col3.metric("Czas", f"{r['time']:.0f}s")
+        show_stored_fig("fig_opt_rs")
+        if "opt_rs_error" in st.session_state:
+            st.error(st.session_state["opt_rs_error"])
+
+
+# =====================================================================
+# TAB: LAB ALGORYTMÓW — porównanie algorytmów optymalizacji layoutu
+# =====================================================================
+with tab_lab:
+    st.header("🧪 Lab algorytmów")
+    st.caption(
+        "Porównaj wiele algorytmów optymalizacji layoutu na **tej samej farmie** "
+        "i **tym samym wąskim binie** wiatrowym (1 kierunek + 1 prędkość = "
+        "szybka ewaluacja, dziesiątki wywołań w kilka sekund). "
+        "Algorytmy startują z siatki regularnej i próbują znaleźć lepszy layout. "
+        "Każdy algorytm to osobny plik w `src/algorithms/`."
+    )
+
+    # --- Konfiguracja warunków ---
+    st.subheader("1. Warunki testowe (wąski bin)")
+    col_wd, col_ws, col_ti = st.columns(3)
+    lab_wd = col_wd.slider("Kierunek WD [°]", 0.0, 350.0, 270.0, 10.0, key="lab_wd")
+    lab_ws = col_ws.slider("Prędkość WS [m/s]", 4.0, 18.0, 9.0, 0.5, key="lab_ws")
+    lab_ti = col_ti.slider("TI", 0.02, 0.15, 0.06, 0.01, key="lab_ti")
+
+    st.subheader("2. Farma startowa")
+    col_r, col_c, col_sp = st.columns(3)
+    lab_n_rows = int(col_r.number_input("Rzędy", 2, 6, 3, 1, key="lab_nr"))
+    lab_n_cols = int(col_c.number_input("Kolumny", 2, 6, 3, 1, key="lab_nc"))
+    lab_spacing_D = col_sp.slider("Spacing startowy [×D]", 4.0, 12.0, 7.0, 0.5, key="lab_sp")
+
+    st.subheader("3. Ograniczenia + budżet")
+    col_m, col_d, col_b, col_s = st.columns(4)
+    lab_margin_D = col_m.slider("Margines boundaries [×D]", 1.0, 5.0, 3.0, 0.5, key="lab_margin")
+    lab_min_dist_D = col_d.slider("Min odległość [×D]", 2.0, 5.0, 3.0, 0.5, key="lab_mindist")
+    lab_eval_budget = int(col_b.number_input("Eval budget per algo", 20, 1000, 100, 10, key="lab_eb"))
+    lab_seed = int(col_s.number_input("Seed", 1, 9999, 42, 1, key="lab_seed"))
+
+    st.subheader("4. Algorytmy do porównania")
+    lab_selected = st.multiselect(
+        "Wybierz algorytmy (każdy w osobnym pliku src/algorithms/)",
+        list(ALGORITHMS.keys()),
+        default=["scipy", "random_search", "genetic", "simulated_annealing"],
+        format_func=lambda k: ALGORITHMS[k].name,
+        key="lab_sel",
+    )
+
+    if st.button("🚀 Uruchom porównanie", key="lab_run", type="primary",
+                 disabled=len(lab_selected) == 0):
+        progress = st.progress(0)
+        status = st.empty()
+        results = []
+
+        for idx, algo_key in enumerate(lab_selected):
+            algo_cls = ALGORITHMS[algo_key]
+            algo = algo_cls()
+            status.write(f"⏳ {idx + 1}/{len(lab_selected)}: {algo.name}...")
+
+            try:
+                # Świeża farma per algorytm — czyste startowe warunki
+                lab_farm = FarmModel(
+                    wake_model=wake_model, turbine=turbine_name,
+                    wave_period=wave_period, wave_height=wave_height,
+                )
+                lab_farm.set_layout_grid(
+                    n_rows=lab_n_rows, n_cols=lab_n_cols, spacing_D=lab_spacing_D,
+                )
+
+                ts = TimeSeries(
+                    wind_directions=np.array([lab_wd]),
+                    wind_speeds=np.array([lab_ws]),
+                    turbulence_intensities=np.array([lab_ti]),
+                )
+                lab_farm.set_wind_data(ts)
+
+                bounds = bounds_from_layout(
+                    lab_farm.layout_x, lab_farm.layout_y, lab_margin_D * lab_farm.D,
+                )
+                min_dist = lab_min_dist_D * lab_farm.D
+
+                res = algo.run(
+                    lab_farm, bounds, min_dist, lab_eval_budget, seed=lab_seed,
+                )
+                results.append(res)
+            except Exception as e:
+                from src.algorithms import AlgorithmResult
+                results.append(AlgorithmResult(
+                    name=algo.name,
+                    initial_x=np.array([]), initial_y=np.array([]), initial_aep=0.0,
+                    final_x=np.array([]), final_y=np.array([]), final_aep=0.0,
+                    elapsed_s=0.0, n_evaluations=0, error=str(e),
+                ))
+
+            progress.progress((idx + 1) / len(lab_selected))
+
+        status.empty()
+        progress.empty()
+        st.session_state["lab_results"] = results
+
+    # --- Wyniki ---
+    if "lab_results" in st.session_state:
+        results = st.session_state["lab_results"]
+
+        # Tabela porównawcza
+        table_data = []
+        for r in results:
+            table_data.append({
+                "Algorytm": r.name,
+                "AEP init [GWh]": round(r.initial_aep, 3),
+                "AEP final [GWh]": round(r.final_aep, 3),
+                "Δ [GWh]": round(r.improvement_gwh, 4),
+                "Δ [%]": round(r.improvement_pct, 3),
+                "Czas [s]": round(r.elapsed_s, 2),
+                "Ewaluacje": r.n_evaluations,
+                "Błąd": (r.error or "")[:60],
+            })
+        df_lab = pd.DataFrame(table_data)
+        st.subheader("📊 Tabela porównawcza")
+        st.dataframe(df_lab, hide_index=True, use_container_width=True)
+
+        valid = [r for r in results if r.error is None and r.final_aep > 0]
+        if valid:
+            best = max(valid, key=lambda r: r.final_aep)
+            fastest = min(valid, key=lambda r: r.elapsed_s)
+            col_b1, col_b2 = st.columns(2)
+            col_b1.success(
+                f"🏆 **Najlepszy AEP:** {best.name} → "
+                f"{best.final_aep:.3f} GWh (+{best.improvement_pct:.2f}%)"
+            )
+            col_b2.info(f"⚡ **Najszybszy:** {fastest.name} → {fastest.elapsed_s:.1f}s")
+
+        # Wykres zbieżności
+        st.subheader("📈 Zbieżność algorytmów")
+        valid_hist = [r for r in results if len(r.history) > 1]
+        if valid_hist:
+            fig_conv, ax_conv = plt.subplots(figsize=(10, 5))
+            cmap = plt.cm.tab10(np.linspace(0, 1, max(len(valid_hist), 1)))
+            for r, color in zip(valid_hist, cmap):
+                ax_conv.plot(r.history, label=r.name, color=color, linewidth=2, alpha=0.85)
+            ax_conv.set_xlabel("Iteracja / krok")
+            ax_conv.set_ylabel("Best AEP [GWh]")
+            ax_conv.set_title("Krzywe zbieżności")
+            ax_conv.legend(loc="lower right", fontsize=9)
+            ax_conv.grid(True, alpha=0.3)
+            st.pyplot(fig_conv)
+            plt.close()
+
+        # Wykres słupkowy improvement
+        st.subheader("📊 Poprawa AEP")
+        fig_imp, (ax_imp, ax_time) = plt.subplots(1, 2, figsize=(13, 5))
+        names = [r.name for r in results]
+        imps = [r.improvement_pct for r in results]
+        times = [r.elapsed_s for r in results]
+        colors = ["#1e5c3a" if i >= 0 else "#c8531a" for i in imps]
+
+        ax_imp.barh(names, imps, color=colors)
+        ax_imp.set_xlabel("Improvement [%]")
+        ax_imp.set_title("Poprawa AEP względem startu")
+        for i, v in enumerate(imps):
+            ax_imp.text(v, i, f" {v:+.2f}%", va="center", fontsize=9)
+        ax_imp.axvline(0, color="black", linewidth=0.5)
+        ax_imp.grid(True, alpha=0.3, axis="x")
+
+        ax_time.barh(names, times, color="#534AB7")
+        ax_time.set_xlabel("Czas [s]")
+        ax_time.set_title("Czas wykonania")
+        for i, v in enumerate(times):
+            ax_time.text(v, i, f" {v:.1f}s", va="center", fontsize=9)
+        ax_time.grid(True, alpha=0.3, axis="x")
+
+        fig_imp.tight_layout()
+        st.pyplot(fig_imp)
+        plt.close()
+
+        # Layout porównanie
+        st.subheader("📍 Layouty — przed vs po (per algorytm)")
+        n_show = len([r for r in results if len(r.final_x) > 0])
+        if n_show > 0:
+            n_cols_fig = min(n_show, 3)
+            n_rows_fig = int(np.ceil(n_show / n_cols_fig))
+            fig_lay, axes_lay = plt.subplots(
+                n_rows_fig, n_cols_fig,
+                figsize=(5 * n_cols_fig, 5 * n_rows_fig),
+                squeeze=False,
+            )
+            shown = 0
+            for r in results:
+                if len(r.final_x) == 0:
+                    continue
+                ax = axes_lay[shown // n_cols_fig][shown % n_cols_fig]
+                ax.scatter(r.initial_x, r.initial_y, s=60, c="#888888",
+                           alpha=0.5, label="Start", marker="x")
+                ax.scatter(r.final_x, r.final_y, s=80, c="#1e5c3a",
+                           label="Final", edgecolors="white", linewidths=1)
+                # strzałki
+                for sx, sy, fx, fy in zip(r.initial_x, r.initial_y, r.final_x, r.final_y):
+                    if abs(fx - sx) > 1 or abs(fy - sy) > 1:
+                        ax.annotate(
+                            "", xy=(fx, fy), xytext=(sx, sy),
+                            arrowprops=dict(arrowstyle="->", color="#c8531a", alpha=0.4, lw=1),
+                        )
+                ax.set_title(f"{r.name}\n+{r.improvement_pct:.2f}% in {r.elapsed_s:.1f}s")
+                ax.set_aspect("equal")
+                ax.grid(True, alpha=0.3)
+                ax.legend(fontsize=8, loc="upper right")
+                shown += 1
+            for idx in range(shown, n_rows_fig * n_cols_fig):
+                axes_lay[idx // n_cols_fig][idx % n_cols_fig].set_visible(False)
+            fig_lay.tight_layout()
+            st.pyplot(fig_lay)
+            plt.close()
+
+        # Eksport
+        st.divider()
+        st.download_button(
+            "⬇️ Eksport CSV (porównanie)",
+            df_lab.to_csv(index=False),
+            file_name="lab_algorithms.csv", mime="text/csv",
+        )
+
+        # Eksport layoutów per algo
+        for r in results:
+            if len(r.final_x) == 0:
+                continue
+            algo_layout_df = pd.DataFrame({
+                "turbine_id": range(len(r.final_x)),
+                "x_m": r.final_x,
+                "y_m": r.final_y,
+            })
+            st.download_button(
+                f"⬇️ Layout final — {r.name}",
+                algo_layout_df.to_csv(index=False),
+                file_name=f"layout_{r.name.replace(' ', '_').replace('(', '').replace(')', '').lower()}.csv",
+                mime="text/csv",
+                key=f"dl_{r.name}",
+            )
+
+    # --- Dokumentacja jak dodać własny algorytm ---
+    with st.expander("💡 Jak dodać własny algorytm?"):
+        st.markdown("""
+1. Stwórz nowy plik w `src/algorithms/moj_algo.py`
+2. Zdefiniuj klasę dziedziczącą po `LayoutAlgorithm`:
+```python
+from .base import LayoutAlgorithm, AlgorithmResult, evaluate_aep
+
+class MojAlgorytm(LayoutAlgorithm):
+    name = "Mój Algorytm"
+    description = "Opis"
+
+    def run(self, farm, bounds_rect, min_dist, eval_budget, seed=42, **params):
+        # ... twoja logika ...
+        return AlgorithmResult(...)
+```
+3. Dodaj do `src/algorithms/__init__.py`:
+```python
+from .moj_algo import MojAlgorytm
+ALGORITHMS["moj"] = MojAlgorytm
+```
+4. Algorytm pojawi się tutaj automatycznie.
+        """)
+
+
+# =====================================================================
+# TAB: GRUPA 3 — WAKE STEERING (Yaw + Curtailment + Helix)
+# =====================================================================
+with tab_group3:
+    st.header("🤝 Grupa 3 — Wake Steering")
+    st.caption(
+        "Temat 3 (sterowanie aerodynamiczne farmy): yaw, hamowanie/derating "
+        "upstream, Active Wake Mixing. Wszystko bazuje na layoucie z naszej "
+        "Optymalizacji (Temat 2). Tu są zarówno **gotowe analizy** dla Grupy 3, "
+        "jak i **opis co jeszcze powinni dorobić**."
+    )
+
+    g3_section = st.radio(
+        "Sekcja",
+        ["📋 Co robi Grupa 3", "🎯 Yaw (wake steering)", "🛑 Curtailment (baza)",
+         "🌀 Active Wake Mixing (Helix)", "📊 Porównanie strategii", "📁 Eksport"],
+        horizontal=False,
+    )
+
+    # ----- A. Opis zadań Grupy 3 -----
+    if g3_section == "📋 Co robi Grupa 3":
+        st.subheader("Zakres tematu 3 — sterowanie aerodynamiczne farmy")
+        st.markdown("""
+**Wejście (od Tematu 2):** `layout.csv` z naszej zakładki **📁 Eksport**.
+
+**Wyjście Tematu 3:** strategie sterowania farmą redukujące straty wake — eksport jako `yaw_schedule.csv`, `curtailment_schedule.csv`, `wake_steering_summary.csv`.
+
+---
+
+#### A. Wake steering — pogłębienie analizy yaw
+Bazę macie gotową (`Optimizer.optimize_yaw()` w `src/optimizer.py`, sekcja "🎯 Yaw" poniżej). Co dorobić:
+
+1. **Yaw schedule lookup table** — eksport tabeli yaw_kąt per (wd, ws, turbina_id). Sterownik turbiny musi to wczytać.
+2. **Robust wake steering** — re-optymalizacja z niepewnością kierunku (σ_WD = 3°/5°/7°). Pokazuje jak "ostry" lub "miękki" jest optymalny kąt.
+3. **Yaw_max sweep** (0/15/25/30°) — krzywa AEP(yaw_max), znajdźcie "sweet spot" akceptowany przez producenta turbiny.
+4. **Per-single-bin diagnostyka** — yaw dla pojedynczego (WD, WS) + wizualizacja deflection wake.
+
+#### B. Curtailment / hamowanie upstream
+Baza w sekcji "🛑 Curtailment" poniżej. Co dorobić:
+
+1. **Greedy curtailment** — algorytm: w każdej iteracji wybiera turbinę do zderatowania jeśli farma jako całość zyskuje (upstream produkuje < rated, downstream wychodzi z cienia).
+2. **Per-direction strategy** — różne zestawy zderatowanych turbin dla różnych kierunków.
+3. **Hybrid yaw + curtailment** — kombinacja obu strategii.
+
+#### C. Active Wake Mixing (Helix)
+Bazę macie w sekcji "🌀 Helix". Co dorobić:
+
+1. Porównanie: brak / yaw / helix / yaw+helix dla różnych kierunków.
+2. Analiza wrażliwości amplitudy modulacji helix.
+
+#### D. Raport końcowy (Wasz output)
+Tabela: brak / yaw / curtailment / helix / kombinacje — AEP, % zmiany AEP, czas obliczeń, ryzyko (mechaniczne obciążenia turbiny).
+
+#### Pliki techniczne, którymi można manipulować
+- `src/optimizer.py` → `optimize_yaw()` (SerialRefine) — można dodać `optimize_yaw_robust()`
+- `farm.fmodel.set(disable_turbines=...)` — wyłączanie turbin
+- `farm.fmodel.set_operation_model("simple-derating")` + `power_setpoints=...` — derating
+- `enable_active_wake_mixing=True` w configu wake — helix
+- Notebook `notebooks/05_advanced_floris.py` ma działające przykłady wszystkich powyższych
+        """)
+
+    # ----- B. Yaw (przeniesione z zakładki Optymalizacja) -----
+    elif g3_section == "🎯 Yaw (wake steering)":
+        st.subheader("Optymalizacja kątów yaw")
+        st.caption(
+            "FLORIS YawOptimizationSR (SerialRefine) — znajduje optymalne kąty yaw "
+            "per kierunek wiatru. Eksport schedule poniżej."
+        )
+
+        col_y1, col_y2 = st.columns(2)
+        yaw_max = col_y1.slider("Max kąt yaw [°]", 10.0, 35.0, 25.0, 5.0, key="yaw_max")
+        yaw_min = col_y2.slider("Min kąt yaw [°]", -35.0, 0.0, 0.0, 5.0, key="yaw_min")
+
+        if st.button("🎯 Optymalizuj yaw", key="g3_opt_yaw"):
+            with st.spinner("Optymalizacja yaw..."):
+                wr_coarse = loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
+                farm.set_wind_data(wr_coarse)
+                opt = Optimizer(farm)
+                try:
+                    result_yaw = opt.optimize_yaw(yaw_min=yaw_min, yaw_max=yaw_max)
+                    st.session_state["g3_yaw_result"] = {
                         "before": result_yaw.initial_aep_gwh,
                         "after": result_yaw.optimized_aep_gwh,
                         "pct": result_yaw.aep_improvement_pct,
                         "time": result_yaw.elapsed_seconds,
+                        "yaw_angles": result_yaw.yaw_angles,
                     }
                     fig = opt.plot_yaw_result(result_yaw)
-                    st.session_state["fig_yaw"] = fig_to_bytes(fig)
+                    st.session_state["g3_fig_yaw"] = fig_to_bytes(fig)
                 except Exception as e:
-                    st.session_state["yaw_error"] = str(e)
-
+                    st.session_state["g3_yaw_error"] = str(e)
                 farm.set_wind_data(wind_rose)
 
-        if "yaw_result" in st.session_state:
-            r = st.session_state["yaw_result"]
+        if "g3_yaw_result" in st.session_state:
+            r = st.session_state["g3_yaw_result"]
             col1, col2, col3 = st.columns(3)
             col1.metric("AEP bez yaw", f"{r['before']:.1f} GWh")
             col2.metric("AEP z yaw", f"{r['after']:.1f} GWh", f"+{r['pct']:.2f}%")
             col3.metric("Czas", f"{r['time']:.0f}s")
-        show_stored_fig("fig_yaw")
-        if "yaw_error" in st.session_state:
-            st.error(st.session_state["yaw_error"])
+        show_stored_fig("g3_fig_yaw")
+        if "g3_yaw_error" in st.session_state:
+            st.error(st.session_state["g3_yaw_error"])
+
+        # Yaw max sweep
+        st.divider()
+        st.subheader("Yaw_max sweep — wpływ ograniczenia kąta na AEP")
+        st.caption("Wykres AEP(yaw_max) dla różnych ograniczeń kąta yaw — pomocne dla Grupy 3.")
+        if st.button("📈 Uruchom sweep yaw_max", key="g3_yaw_sweep"):
+            with st.spinner("Sweep yaw_max..."):
+                wr_coarse = loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
+                farm.set_wind_data(wr_coarse)
+                sweep_results = []
+                yaw_maxes = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0]
+                for ym in yaw_maxes:
+                    try:
+                        if ym == 0.0:
+                            farm.run()
+                            sweep_results.append({"yaw_max": 0.0, "aep": farm.get_aep_gwh()})
+                        else:
+                            opt = Optimizer(farm)
+                            res = opt.optimize_yaw(yaw_min=0.0, yaw_max=ym)
+                            sweep_results.append({"yaw_max": ym, "aep": res.optimized_aep_gwh})
+                    except Exception as e:
+                        sweep_results.append({"yaw_max": ym, "aep": None, "error": str(e)[:40]})
+                farm.set_wind_data(wind_rose)
+                st.session_state["g3_yaw_sweep"] = sweep_results
+
+        if "g3_yaw_sweep" in st.session_state:
+            sweep = st.session_state["g3_yaw_sweep"]
+            df_sweep = pd.DataFrame(sweep)
+            st.dataframe(df_sweep, hide_index=True, use_container_width=True)
+            valid_sweep = [s for s in sweep if s.get("aep") is not None]
+            if len(valid_sweep) > 1:
+                fig_sw, ax_sw = plt.subplots(figsize=(8, 4))
+                ax_sw.plot([s["yaw_max"] for s in valid_sweep],
+                           [s["aep"] for s in valid_sweep],
+                           "o-", color="#534AB7", linewidth=2)
+                ax_sw.set_xlabel("Yaw max [°]")
+                ax_sw.set_ylabel("AEP [GWh]")
+                ax_sw.set_title("Wpływ ograniczenia yaw_max na AEP")
+                ax_sw.grid(True, alpha=0.3)
+                st.pyplot(fig_sw)
+                plt.close()
+
+    # ----- C. Curtailment baseline -----
+    elif g3_section == "🛑 Curtailment (baza)":
+        st.subheader("Hamowanie / wyłączanie turbin upstream")
+        st.caption(
+            "Baza pod algorytm Grupy 3: wyłączasz wybrane turbiny → "
+            "downstream mają mniejszy ślad aerodynamiczny. Sprawdza czy farma "
+            "jako całość zyskuje. Tu **ręczny wybór turbin**; Grupa 3 buduje na tym **algorytm**."
+        )
+
+        st.write(f"Farma ma **{farm.n_turbines}** turbin (indeksy 0..{farm.n_turbines - 1}).")
+        curt_ids = st.multiselect(
+            "Turbiny do wyłączenia",
+            list(range(farm.n_turbines)),
+            default=[],
+            key="g3_curt_ids",
+            format_func=lambda i: f"T{i}",
+        )
+
+        col_cm1, col_cm2 = st.columns(2)
+        curt_mode = col_cm1.radio(
+            "Tryb", ["Wyłączenie (disable)", "Derating do X MW"],
+            horizontal=True, key="g3_curt_mode",
+        )
+        if curt_mode == "Derating do X MW":
+            derate_mw = col_cm2.slider("Derating power [MW]", 1.0, turbine_info["rated_power"], 10.0, 0.5, key="g3_derate_mw")
+        else:
+            derate_mw = None
+
+        if st.button("🛑 Symuluj curtailment", key="g3_run_curt"):
+            with st.spinner("Obliczam..."):
+                try:
+                    # AEP bez curtailment
+                    farm.fmodel.set(disable_turbines=None)
+                    farm.fmodel.set_operation_model("simple")
+                    farm.fmodel.reset_operation()
+                    farm.set_wind_data(wind_rose)
+                    farm.run()
+                    aep_full = farm.get_aep_gwh()
+
+                    n_findex = farm.fmodel.core.flow_field.n_findex
+                    n_turb = farm.n_turbines
+
+                    if curt_mode == "Wyłączenie (disable)":
+                        disable_arr = np.full((n_findex, n_turb), False)
+                        for tid in curt_ids:
+                            disable_arr[:, tid] = True
+                        farm.fmodel.set(disable_turbines=disable_arr)
+                    else:  # derating
+                        farm.fmodel.set(disable_turbines=np.full((n_findex, n_turb), False))
+                        farm.fmodel.set_operation_model("simple-derating")
+                        ps = np.full((n_findex, n_turb), None, dtype=object)
+                        for tid in curt_ids:
+                            ps[:, tid] = derate_mw * 1e6
+                        farm.fmodel.set(power_setpoints=ps)
+
+                    farm.run()
+                    aep_curt = farm.get_aep_gwh()
+
+                    # reset
+                    farm.fmodel.set(disable_turbines=np.full((n_findex, n_turb), False))
+                    farm.fmodel.set_operation_model("simple")
+                    farm.fmodel.reset_operation()
+                    farm.set_wind_data(wind_rose)
+
+                    delta_pct = (aep_curt - aep_full) / aep_full * 100 if aep_full else 0
+                    st.session_state["g3_curt_result"] = {
+                        "full": aep_full, "curt": aep_curt, "delta_pct": delta_pct,
+                        "ids": curt_ids, "mode": curt_mode,
+                    }
+                except Exception as e:
+                    st.session_state["g3_curt_error"] = str(e)
+
+        if "g3_curt_result" in st.session_state:
+            r = st.session_state["g3_curt_result"]
+            col1, col2, col3 = st.columns(3)
+            col1.metric("AEP pełny", f"{r['full']:.1f} GWh")
+            col2.metric("AEP z curtailment", f"{r['curt']:.1f} GWh", f"{r['delta_pct']:+.2f}%")
+            col3.metric("Wyłączone", f"{len(r['ids'])} turbin")
+            if r["delta_pct"] > 0:
+                st.success("Curtailment poprawia AEP — wake-saving zadziałało!")
+            else:
+                st.warning(
+                    "Curtailment obniża AEP. To **normalne** dla wielu konfiguracji — "
+                    "Grupa 3 ma znaleźć kombinację (kierunek wiatru, zestaw turbin) "
+                    "gdzie zysk z mniejszego cienia przewyższa stratę z wyłączonej turbiny."
+                )
+        if "g3_curt_error" in st.session_state:
+            st.error(st.session_state["g3_curt_error"])
+
+        st.divider()
+        st.caption(
+            "**Dla Grupy 3:** szablon algorytmu greedy_curtailment — sprawdzaj per kierunek wiatru, "
+            "wybieraj iteracyjnie kandydatów do wyłączenia, akceptuj jeśli farma zyskuje. "
+            "Patrz: `notebooks/05_advanced_floris.py` linie 160-205."
+        )
+
+    # ----- D. Helix (Active Wake Mixing) -----
+    elif g3_section == "🌀 Active Wake Mixing (Helix)":
+        st.subheader("Active Wake Mixing (Helix)")
+        st.caption(
+            "Modulacja pitch łopat powoduje 'helikoidalny' ślad który szybciej "
+            "dyfunduje. Wymaga modelu wake `empirical_gauss`. Baza dla Grupy 3."
+        )
+        st.info(
+            "Implementacja referencyjna w `notebooks/05_advanced_floris.py` linie 470-530. "
+            "Grupa 3 buduje na tym własną analizę:\n"
+            "1. Włącza `enable_active_wake_mixing=True` w configu wake\n"
+            "2. Porównuje AEP: bez / z helix / z helix+yaw\n"
+            "3. Analizuje wpływ amplitudy modulacji"
+        )
+        st.code('''# Szablon — uruchom w notebooku lub tu w UI:
+from floris.utilities import load_yaml
+from pathlib import Path
+import floris
+
+FLORIS_DIR = Path(floris.__file__).parent
+helix_dict = load_yaml(FLORIS_DIR / "default_inputs.yaml")
+helix_dict["farm"]["turbine_type"] = ["iea_15MW"]
+helix_dict["flow_field"]["reference_wind_height"] = 150.0
+helix_dict["wake"]["model_strings"]["velocity_model"] = "empirical_gauss"
+helix_dict["wake"]["model_strings"]["deflection_model"] = "empirical_gauss"
+helix_dict["wake"]["model_strings"]["turbulence_model"] = "wake_induced_mixing"
+helix_dict["wake"]["enable_active_wake_mixing"] = True
+# ... farm = FarmModel(custom_config=helix_dict) ...''', language="python")
+
+    # ----- E. Porównanie strategii -----
+    elif g3_section == "📊 Porównanie strategii":
+        st.subheader("Porównanie strategii sterowania")
+        st.caption(
+            "Brak sterowania vs Yaw vs Curtailment vs kombinacje. "
+            "Grupa 3 rozbuduje to o pełną macierz strategii."
+        )
+
+        if st.button("📊 Porównaj strategie", key="g3_compare"):
+            with st.spinner("Liczę strategie..."):
+                results = []
+                try:
+                    wr_coarse = loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
+                    farm.set_wind_data(wr_coarse)
+                    farm.run()
+                    aep_base = farm.get_aep_gwh()
+                    results.append({"Strategia": "Brak sterowania", "AEP [GWh]": round(aep_base, 2), "Δ [%]": 0.0})
+
+                    # Yaw
+                    try:
+                        opt = Optimizer(farm)
+                        r_yaw = opt.optimize_yaw()
+                        results.append({
+                            "Strategia": "Yaw (SerialRefine)",
+                            "AEP [GWh]": round(r_yaw.optimized_aep_gwh, 2),
+                            "Δ [%]": round(r_yaw.aep_improvement_pct, 2),
+                        })
+                    except Exception as e:
+                        results.append({"Strategia": "Yaw (SerialRefine)", "AEP [GWh]": "ERR", "Δ [%]": str(e)[:30]})
+
+                    farm.set_wind_data(wind_rose)
+                    st.session_state["g3_compare"] = results
+                except Exception as e:
+                    st.session_state["g3_compare_error"] = str(e)
+
+        if "g3_compare" in st.session_state:
+            st.dataframe(pd.DataFrame(st.session_state["g3_compare"]), hide_index=True, use_container_width=True)
+            st.caption(
+                "**TODO Grupy 3:** dodać wiersze: Curtailment (best greedy), "
+                "Helix (AWM), Yaw+Helix, Yaw+Curtailment."
+            )
+        if "g3_compare_error" in st.session_state:
+            st.error(st.session_state["g3_compare_error"])
+
+    # ----- F. Eksport -----
+    elif g3_section == "📁 Eksport":
+        st.subheader("Eksport dla Grupy 3")
+
+        # Yaw schedule
+        st.write("**1. Yaw schedule** — uruchom najpierw optymalizację yaw w sekcji '🎯 Yaw'.")
+        if "g3_yaw_result" in st.session_state and st.session_state["g3_yaw_result"].get("yaw_angles") is not None:
+            yaw_arr = st.session_state["g3_yaw_result"]["yaw_angles"]
+            # yaw_arr shape: (n_findex, n_turbines)
+            rows = []
+            for fi in range(yaw_arr.shape[0]):
+                for ti in range(yaw_arr.shape[1]):
+                    rows.append({"findex": fi, "turbine_id": ti, "yaw_deg": float(yaw_arr[fi, ti])})
+            yaw_df = pd.DataFrame(rows)
+            st.dataframe(yaw_df.head(20), hide_index=True, use_container_width=True)
+            st.caption(f"Total: {len(yaw_df)} wierszy ({yaw_arr.shape[0]} warunków wiatrowych × {yaw_arr.shape[1]} turbin)")
+            st.download_button(
+                "⬇️ Pobierz yaw_schedule.csv",
+                yaw_df.to_csv(index=False),
+                file_name="yaw_schedule.csv", mime="text/csv",
+            )
+        else:
+            st.info("Najpierw uruchom optymalizację yaw w sekcji '🎯 Yaw (wake steering)'.")
+
+        st.divider()
+        st.write("**2. Layout dla Grupy 3** (taki sam jak w zakładce Eksport, dla wygody):")
+        layout_df_g3 = pd.DataFrame({
+            "turbine_id": range(farm.n_turbines),
+            "x_m": farm.layout_x,
+            "y_m": farm.layout_y,
+            "turbine_type": turbine_name,
+        })
+        st.dataframe(layout_df_g3, use_container_width=True, hide_index=True)
+        st.download_button(
+            "⬇️ Pobierz layout.csv (dla Grupy 3)",
+            layout_df_g3.to_csv(index=False),
+            file_name="layout.csv", mime="text/csv",
+            key="g3_dl_layout",
+        )
 
 
 # =====================================================================
@@ -1808,5 +2507,6 @@ st.caption(
     f"Temat 2 — Lokalizacja i rozmieszczenie farm wiatrowych | "
     f"FLORIS v{floris.__version__} | {turbine_info['name']} | {wake_model.upper()}"
     + (f" | 🌊 Floating" if is_floating else "")
+    + (f" | 📡 ERA5 ({era5_lat:.1f}°N, {era5_lon:.1f}°E)" if era5_active else " | 🎲 Mock data")
     + f" | Dashboard v3"
 )

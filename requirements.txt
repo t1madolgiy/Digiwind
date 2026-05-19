@@ -9,10 +9,11 @@ pandas>=2.0
 scipy>=1.12
 matplotlib>=3.8
 
-# ERA5 data (opcjonalne — zainstaluj gdy potrzebne)
-# cdsapi             # pip install cdsapi
-# xarray             # pip install xarray
-# netcdf4            # pip install netcdf4
+# ERA5 data (Copernicus Climate Data Store)
+# Wymaga ~/.cdsapirc z kluczem API: https://cds.climate.copernicus.eu/api-how-to
+cdsapi>=0.7
+xarray>=2024.1
+netcdf4>=1.6
 
 # Streamlit (Etap 2 — frontend)
 # streamlit>=1.30    # pip install streamlit
