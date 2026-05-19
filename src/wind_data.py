@@ -162,8 +162,10 @@ class WindDataLoader:
         seasonal_shift = 30.0 * np.sin(2 * np.pi * day_of_year / 365.25)
         dominant_rad = np.radians(config.dominant_direction + seasonal_shift)
 
-        # Koncentracja von Mises (kappa) — im wyższa, tym węższy rozkład
-        kappa = 1.5  # umiarkowana koncentracja, realistyczna dla offshore
+        # Koncentracja von Mises (kappa) z direction_spread (σ w stopniach).
+        # Dla rozkładu von Mises: σ ≈ 1/√κ (radiany) dla wąskich rozkładów.
+        spread_rad = np.radians(max(config.direction_spread, 1.0))
+        kappa = 1.0 / (spread_rad ** 2)
         raw_dirs = rng.vonmises(dominant_rad, kappa, n)
         self.wind_directions = np.degrees(raw_dirs) % 360.0
 

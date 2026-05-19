@@ -189,6 +189,17 @@ with st.sidebar:
     if data_source == "Mock (Weibull)":
         weibull_A = st.slider("Weibull A [m/s]", 6.0, 14.0, 9.5, 0.5)
         weibull_k = st.slider("Weibull k", 1.5, 3.0, 2.1, 0.1)
+        col_dir1, col_dir2 = st.columns(2)
+        dominant_direction = col_dir1.slider(
+            "Dominujący kierunek [°]", 0, 359, 240, 10,
+            help="Średni kierunek wiatru (0=N, 90=E, 180=S, 270=W). "
+                 "Bałtyk Południowy: ~240° (SW–W).",
+        )
+        direction_spread = col_dir2.slider(
+            "Rozrzut kierunku [°]", 10, 120, 60, 5,
+            help="Odchylenie standardowe kierunku. Większa wartość = bardziej "
+                 "rozproszona róża, mniejsza = wąski sektor dominujący.",
+        )
         n_years = st.selectbox("Lata danych", [1, 2, 3], index=0)
         era5_lat = 54.5
         era5_lon = 16.5
@@ -209,12 +220,17 @@ with st.sidebar:
         # Wartości "ghost" — potrzebne dalej do klucza cache i fallbacku
         weibull_A = 9.5
         weibull_k = 2.1
+        dominant_direction = 240
+        direction_spread = 60
         n_years = 1
 
     wr_resolution = st.selectbox(
         "Rozdzielczość WindRose",
         ["Gruby (30°)", "Dokładny (10°)", "Precyzyjny (5°)"],
         index=1,
+        help="Wpływa na: (1) binning AEP w FLORIS (więcej sektorów → "
+             "dokładniejszy AEP ale wolniej), (2) liczbę słupków na wykresie "
+             "róży w zakładce 🌬️ Wiatr.",
     )
 
 
@@ -222,9 +238,11 @@ with st.sidebar:
 # INICJALIZACJA DANYCH
 # =====================================================================
 @st.cache_data
-def generate_wind_data(weibull_A, weibull_k, n_years):
+def generate_wind_data(weibull_A, weibull_k, n_years, dominant_direction=240.0, direction_spread=60.0):
     config = BalticWindConfig(
         weibull_A=weibull_A, weibull_k=weibull_k,
+        dominant_direction=float(dominant_direction),
+        direction_spread=float(direction_spread),
         n_hours=8760 * n_years,
     )
     loader = WindDataLoader()
@@ -256,15 +274,15 @@ era5_active = False
 era5_error = None
 
 if data_source == "Mock (Weibull)":
-    loader = generate_wind_data(weibull_A, weibull_k, n_years)
+    loader = generate_wind_data(weibull_A, weibull_k, n_years, dominant_direction, direction_spread)
 elif not era5_years:
     st.sidebar.warning("⚠️ Wybierz co najmniej jeden rok ERA5. Używam mock.")
-    loader = generate_wind_data(weibull_A, weibull_k, n_years)
+    loader = generate_wind_data(weibull_A, weibull_k, n_years, dominant_direction, direction_spread)
 else:
     loader, era5_error = load_era5_wind(era5_lat, era5_lon, era5_years, era5_hub_input)
     if loader is None:
         st.sidebar.error(f"❌ ERA5: {era5_error}\n\nUżywam mock data.")
-        loader = generate_wind_data(weibull_A, weibull_k, n_years)
+        loader = generate_wind_data(weibull_A, weibull_k, n_years, dominant_direction, direction_spread)
     else:
         era5_active = True
         st.sidebar.success(
@@ -306,7 +324,7 @@ cf = aep / (rated_total * 8.76) * 100 if rated_total > 0 else 0
 # --- Config key do czyszczenia session_state ---
 _data_part = (
     f"era5_{era5_lat}_{era5_lon}_{era5_years}_{era5_hub_input}"
-    if era5_active else f"mock_{weibull_A}_{weibull_k}_{n_years}"
+    if era5_active else f"mock_{weibull_A}_{weibull_k}_{n_years}_{dominant_direction}_{direction_spread}"
 )
 _config_key = f"{turbine_name}_{wake_model}_{layout_type}_{spacing_D}_{n_rows}_{n_cols}_{_data_part}"
 if st.session_state.get("_prev_config") != _config_key:
@@ -394,9 +412,26 @@ with tab_overview:
 with tab_wind:
     st.header("Dane wiatrowe")
 
+    if era5_active:
+        st.caption(
+            f"🛰️ ERA5 @ {era5_lat:.1f}°N, {era5_lon:.1f}°E | "
+            f"lata: {', '.join(map(str, era5_years))} | hub: {era5_hub_input:.0f} m"
+        )
+    else:
+        st.caption(
+            f"🎲 Mock (Weibull) | A={weibull_A:.1f} m/s, k={weibull_k:.1f} | "
+            f"dominujący kier.: {dominant_direction}°, rozrzut: {direction_spread}° | "
+            f"{n_years} lat"
+        )
+
     col_rose, col_stats = st.columns([2, 1])
     with col_rose:
-        fig = loader.plot_wind_rose(title="Róża wiatrów")
+        n_sectors_plot = int(round(360 / wd_step))
+        rose_title = (
+            f"Róża wiatrów — {n_sectors_plot} sektorów (Δ={wd_step:.0f}°)"
+            + (f" | {dominant_direction}° ±{direction_spread}°" if not era5_active else " | ERA5")
+        )
+        fig = loader.plot_wind_rose(title=rose_title, n_sectors=n_sectors_plot)
         st.pyplot(fig)
         plt.close()
     with col_stats:
