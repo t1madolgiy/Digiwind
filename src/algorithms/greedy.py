@@ -19,6 +19,10 @@ from .base import LayoutAlgorithm, AlgorithmResult, evaluate_aep, repair_min_dis
 class GreedyRelocate(LayoutAlgorithm):
     name = "Greedy Relocate"
     description = "Po kolei każda turbina szuka najlepszej lokalnej pozycji."
+    PARAMS = [
+        {"key": "radius_D", "label": "Radius eksploracji [×D]", "type": "float", "min": 0.5, "max": 5.0, "default": 2.0, "step": 0.5},
+        {"key": "n_trials", "label": "Próby na turbinę", "type": "int", "min": 3, "max": 30, "default": 8, "step": 1},
+    ]
 
     def run(
         self,

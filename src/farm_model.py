@@ -830,8 +830,23 @@ class FarmModel:
         if self._wind_data is None:
             raise RuntimeError("Brak danych wiatrowych — użyj set_wind_data() najpierw.")
 
-        # Cache key
-        cache_key = f"{self.wake_model_name}_{self.turbine_name}_{self.n_turbines}"
+        # Cache key — MUSI zależeć od layoutu i danych wiatrowych, bo farma jest
+        # współdzielona (cache_resource) i eval_wind się zmienia. Bez tego zwracano
+        # nieaktualne straty wake po zmianie wiatru/layoutu.
+        try:
+            wd = self._wind_data
+            wind_sig = (
+                f"{float(np.sum(np.asarray(wd.wind_directions))):.2f}_"
+                f"{float(np.sum(np.asarray(wd.wind_speeds))):.2f}_"
+                f"{len(np.atleast_1d(wd.wind_directions))}"
+            )
+        except Exception:
+            wind_sig = str(id(self._wind_data))
+        layout_sig = f"{float(np.sum(self._layout_x)):.1f}_{float(np.sum(self._layout_y)):.1f}"
+        cache_key = (
+            f"{self.wake_model_name}_{self.turbine_name}_{self.n_turbines}_"
+            f"{layout_sig}_{wind_sig}"
+        )
         if hasattr(self, "_wl_cache_key") and self._wl_cache_key == cache_key:
             if hasattr(self, "_wl_cache_val"):
                 return self._wl_cache_val

@@ -134,6 +134,11 @@ if wake_model not in WAKE_MODELS:
     wake_model = _WAKE_KEYS[1]
 
 # --- Layout ---
+# Oczekująca zmiana layoutu (ustawiana z przycisków biblioteki) — aplikowana
+# TU, przed utworzeniem widgetu selectbox (Streamlit nie pozwala zmieniać
+# session_state widgetu po jego instancjonowaniu).
+if "_pending_layout" in st.session_state:
+    st.session_state["cfg_layout"] = st.session_state.pop("_pending_layout")
 layout_type = _cfg("cfg_layout", "grid")
 n_rows = int(_cfg("cfg_nrows", 5))
 n_cols = int(_cfg("cfg_ncols", 5))
@@ -245,15 +250,27 @@ else:
     eval_is_narrow = True
     eval_desc = f"wąski bin — WD={eval_wd:.0f}° · WS={eval_ws:.1f} m/s · TI={eval_ti:.2f}"
 
-farm = FarmModel(
-    wake_model=wake_model,
-    turbine=turbine_name,
-    wind_data=eval_wind,
-    wave_period=wave_period,
-    wave_height=wave_height,
-)
+@st.cache_resource(show_spinner=False)
+def _get_farm(wake_model, turbine_name, wave_period, wave_height):
+    """Buduje FlorisModel RAZ na (wake, turbina, fale). Drogie ładowanie YAML/FLORIS
+    jest cache'owane — bez tego budowałoby się przy każdym kliknięciu."""
+    return FarmModel(
+        wake_model=wake_model, turbine=turbine_name,
+        wave_period=wave_period, wave_height=wave_height,
+    )
 
-if layout_type == "grid":
+farm = _get_farm(wake_model, turbine_name, wave_period, wave_height)
+
+# Layout + wiatr aplikowane co rerun (tanie) — resetuje też ewentualne mutacje
+# pozostawione przez inne zakładki na współdzielonym (cache'owanym) obiekcie.
+_layout_lib = st.session_state.get("layout_lib", {})
+if layout_type in _layout_lib:
+    _ll = _layout_lib[layout_type]
+    farm.set_layout_custom(
+        np.asarray(_ll["x"], dtype=float), np.asarray(_ll["y"], dtype=float),
+        name=layout_type,
+    )
+elif layout_type == "grid":
     farm.set_layout_grid(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D)
 elif layout_type == "staggered":
     farm.set_layout_staggered(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D, offset=stagger_offset)
@@ -266,12 +283,14 @@ elif layout_type == "parallelogram":
     )
 
 farm.set_wind_data(eval_wind)
-farm.run()
-aep = farm.get_aep_gwh()
-rated_total = turbine_info["rated_power"] * farm.n_turbines
-cf = aep / (rated_total * 8.76) * 100 if rated_total > 0 else 0
 
-# --- Config key do czyszczenia session_state ---
+# Defensywny reset stanu operacyjnego współdzielonej (cache'owanej) farmy:
+# czyści ewentualne yaw / disable_turbines / power_setpoints pozostawione przez
+# Grupę 3 (curtailment/yaw) w poprzednim rerunie, żeby nie psuły innych zakładek.
+try:
+    farm.fmodel.reset_operation()
+except Exception:
+    pass
 _data_part = (
     f"era5_{era5_lat}_{era5_lon}_{era5_years}_{era5_hub_input}"
     if era5_active else f"mock_{weibull_A}_{weibull_k}_{n_years}_{dominant_direction}_{direction_spread}"
@@ -280,6 +299,20 @@ _config_key = (
     f"{turbine_name}_{wake_model}_{layout_type}_{spacing_D}_{n_rows}_{n_cols}_{_data_part}"
     f"_eval{eval_mode}_{eval_wd}_{eval_ws}_{eval_ti}"
 )
+
+# AEP liczone TYLKO gdy konfiguracja się zmieniła. Przy zwykłym kliknięciu
+# (np. zmiana zakładki/suwaka w innym module) bierzemy z cache → brak FLORIS run.
+if st.session_state.get("_aep_key") == _config_key and "_aep_val" in st.session_state:
+    aep = st.session_state["_aep_val"]
+else:
+    farm.run()
+    aep = farm.get_aep_gwh()
+    st.session_state["_aep_key"] = _config_key
+    st.session_state["_aep_val"] = aep
+
+rated_total = turbine_info["rated_power"] * farm.n_turbines
+cf = aep / (rated_total * 8.76) * 100 if rated_total > 0 else 0
+
 if st.session_state.get("_prev_config") != _config_key:
     # Konfiguracja się zmieniła — wyczyść stare wyniki
     keys_to_clear = [k for k in st.session_state.keys()
@@ -289,6 +322,25 @@ if st.session_state.get("_prev_config") != _config_key:
     for k in keys_to_clear:
         del st.session_state[k]
     st.session_state["_prev_config"] = _config_key
+
+
+# =====================================================================
+# GLOBALNY PASEK STATUSU (zawsze widoczny nad zakładkami)
+# =====================================================================
+st.title("🌊 DigiWind — optymalizacja farm wiatrowych")
+_sb1, _sb2, _sb3, _sb4, _sb5 = st.columns(5)
+_sb1.metric("Turbina", turbine_info["name"])
+_sb2.metric("Layout", f"{farm.n_turbines} turbin")
+_sb3.metric("Moc", f"{rated_total:.0f} MW")
+_sb4.metric("AEP", f"{aep:.1f} GWh")
+_sb5.metric("Capacity Factor", f"{cf:.1f}%")
+st.caption(
+    f"⚙️ Model wake: **{wake_model.upper()}** · "
+    f"🌬️ Wiatr obliczeniowy: **{eval_desc}** · "
+    f"📊 Dane: **{'ERA5' if era5_active else 'Mock (Weibull)'}**"
+    + ("  — ⚠️ wąski bin: AEP to wskaźnik 1 warunku, nie roczny" if eval_is_narrow else "")
+)
+st.divider()
 
 
 # =====================================================================
@@ -399,20 +451,28 @@ with tab_layout:
         options=_WAKE_KEYS, index=1, key="cfg_wake",
         format_func=lambda x: x.upper(),
     )
+
+    # --- Wybór layoutu: typy parametryczne + biblioteka (z edytora/CSV) ---
+    _lib = st.session_state.setdefault("layout_lib", {})
+    _param_types = ["grid", "staggered", "circular", "parallelogram"]
+    _layout_options = _param_types + list(_lib.keys())
+    _param_labels = {
+        "grid": "Siatka regularna", "staggered": "Siatka przesunięta",
+        "circular": "Kołowy", "parallelogram": "Równoległobok (Malisani 2025)",
+    }
     st.selectbox(
-        "Typ layoutu", options=["grid", "staggered", "circular", "parallelogram"],
-        key="cfg_layout",
-        format_func=lambda x: {
-            "grid": "Siatka regularna", "staggered": "Siatka przesunięta",
-            "circular": "Kołowy", "parallelogram": "Równoległobok (Malisani 2025)",
-        }[x],
+        "Layout farmy (aktywny — używany wszędzie)",
+        options=_layout_options, key="cfg_layout",
+        format_func=lambda x: _param_labels.get(x, f"📚 {x} (biblioteka)"),
     )
     _lt_sel = st.session_state.get("cfg_layout", "grid")
+
     if _lt_sel in ["grid", "staggered"]:
         cnr, cnc = st.columns(2)
         cnr.number_input("Rzędy", 2, 15, 5, key="cfg_nrows")
         cnc.number_input("Kolumny", 2, 15, 5, key="cfg_ncols")
-    st.slider("Rozstaw [×D]", 4.0, 15.0, 7.0, 0.5, key="cfg_spacing")
+    if _lt_sel in _param_types:
+        st.slider("Rozstaw [×D]", 4.0, 15.0, 7.0, 0.5, key="cfg_spacing")
     if _lt_sel == "staggered":
         st.slider("Offset", 0.0, 1.0, 0.5, 0.1, key="cfg_offset")
     if _lt_sel == "circular":
@@ -427,8 +487,35 @@ with tab_layout:
         cp2.slider("r₂ [×D]", 2.0, 10.0, 7.0, 0.5, key="para_r2")
         cp1.slider("θ₁ [°]", -89, 89, 88, 1, key="para_t1")
         cp2.slider("θ₂ [°]", -89, 89, 18, 1, key="para_t2")
+    if _lt_sel in _lib:
+        cdl1, cdl2 = st.columns([3, 1])
+        cdl1.caption(f"📚 Layout z biblioteki: **{_lt_sel}** ({len(_lib[_lt_sel]['x'])} turbin) — współrzędne stałe.")
+        if cdl2.button("🗑️ Usuń z biblioteki", key="del_lib_layout"):
+            del _lib[_lt_sel]
+            st.session_state["_pending_layout"] = "grid"
+            st.rerun()
+
+    # --- Podgląd aktywnego layoutu (grafika) ---
+    st.subheader("Podgląd aktywnego layoutu")
+    fig_act, ax_act = plt.subplots(figsize=(5, 4))
+    ax_act.scatter(farm.layout_x, farm.layout_y, s=35, c="#1e5c3a",
+                   edgecolors="white", linewidths=0.8, zorder=5)
+    for i, (xx, yy) in enumerate(zip(farm.layout_x, farm.layout_y)):
+        ax_act.annotate(str(i), (xx, yy), textcoords="offset points",
+                        xytext=(4, 4), fontsize=6, color="#4a4a45")
+    ax_act.set_xlabel("X [m]", fontsize=8)
+    ax_act.set_ylabel("Y [m]", fontsize=8)
+    ax_act.tick_params(labelsize=7)
+    ax_act.set_aspect("equal")
+    ax_act.grid(True, alpha=0.3)
+    ax_act.set_title(f"{_param_labels.get(_lt_sel, _lt_sel)} — {farm.n_turbines} turbin", fontsize=10)
+    cprev, _ = st.columns([1, 1])
+    with cprev:
+        st.pyplot(fig_act, use_container_width=True)
+    plt.close()
+
     st.divider()
-    st.caption("Edytor ręczny i wczytywanie layoutu z CSV — poniżej ⬇️")
+    st.checkbox("✏️ Pokaż edytor layoutu (ręczna edycja + wczytanie CSV)", key="show_editor")
 
 
 # =====================================================================
@@ -1202,10 +1289,35 @@ with tab_lab:
     lab_selected = st.multiselect(
         "Wybierz algorytmy (każdy w osobnym pliku src/algorithms/)",
         list(ALGORITHMS.keys()),
-        default=["scipy", "random_search", "genetic", "simulated_annealing"],
+        default=["scipy", "random_search", "genetic", "differential_evolution", "simulated_annealing"],
         format_func=lambda k: ALGORITHMS[k].name,
         key="lab_sel",
     )
+
+    # --- Strojenie parametrów per algorytm (z PARAMS każdej klasy) ---
+    lab_algo_params = {}
+    tunable = [k for k in lab_selected if getattr(ALGORITHMS[k], "PARAMS", [])]
+    if tunable:
+        st.subheader("4b. Parametry algorytmów (opcjonalnie)")
+        for algo_key in tunable:
+            cls = ALGORITHMS[algo_key]
+            with st.expander(f"⚙️ {cls.name} — parametry"):
+                pvals = {}
+                pcols = st.columns(min(len(cls.PARAMS), 3))
+                for pi, spec in enumerate(cls.PARAMS):
+                    col = pcols[pi % len(pcols)]
+                    wkey = f"labp_{algo_key}_{spec['key']}"
+                    if spec["type"] == "int":
+                        pvals[spec["key"]] = int(col.number_input(
+                            spec["label"], int(spec["min"]), int(spec["max"]),
+                            int(spec["default"]), int(spec.get("step", 1)), key=wkey,
+                        ))
+                    else:
+                        pvals[spec["key"]] = float(col.slider(
+                            spec["label"], float(spec["min"]), float(spec["max"]),
+                            float(spec["default"]), float(spec.get("step", 0.1)), key=wkey,
+                        ))
+                lab_algo_params[algo_key] = pvals
 
     if st.button("🚀 Uruchom porównanie", key="lab_run", type="primary",
                  disabled=len(lab_selected) == 0):
@@ -1242,6 +1354,7 @@ with tab_lab:
 
                 res = algo.run(
                     lab_farm, bounds, min_dist, lab_eval_budget, seed=lab_seed,
+                    **lab_algo_params.get(algo_key, {}),
                 )
                 results.append(res)
             except Exception as e:
@@ -1371,6 +1484,39 @@ with tab_lab:
             fig_lay.tight_layout()
             st.pyplot(fig_lay)
             plt.close()
+
+        # Flow field (wake) przed/po — opcjonalne (kosztowne: 2 renders × algorytm)
+        st.divider()
+        st.subheader("🌊 Wake (flow field) — przed vs po")
+        if st.checkbox("Pokaż flow field przed/po dla każdego algorytmu", key="lab_show_ff"):
+            valid_ff = [r for r in results if len(r.final_x) > 0]
+            with st.spinner(f"Generuję flow field dla {len(valid_ff)} algorytmów (WD={eval_wd:.0f}° WS={eval_ws:.1f})..."):
+                for r in valid_ff:
+                    st.markdown(f"**{r.name}** — wiatr: WD={eval_wd:.0f}° · WS={eval_ws:.1f} m/s")
+                    fig_ff, (axb, axa) = plt.subplots(1, 2, figsize=(13, 5))
+                    try:
+                        ff_farm = FarmModel(
+                            wake_model=wake_model, turbine=turbine_name,
+                            wave_period=wave_period, wave_height=wave_height,
+                        )
+                        ff_farm.set_layout_custom(r.initial_x, r.initial_y, name="init")
+                        ff_farm.plot_flow_field(
+                            wind_direction=eval_wd, wind_speed=eval_ws, ti=eval_ti, ax=axb,
+                            title=f"PRZED — {r.initial_aep:.3f} GWh",
+                            show_labels=False, show_wind_arrow=True,
+                        )
+                        ff_farm.set_layout_custom(r.final_x, r.final_y, name="final")
+                        ff_farm.plot_flow_field(
+                            wind_direction=eval_wd, wind_speed=eval_ws, ti=eval_ti, ax=axa,
+                            title=f"PO — {r.final_aep:.3f} GWh (+{r.improvement_pct:.2f}%)",
+                            show_labels=False, show_wind_arrow=True,
+                        )
+                    except Exception as e:
+                        axb.text(0.5, 0.5, f"Błąd: {str(e)[:80]}", transform=axb.transAxes,
+                                 ha="center", va="center", fontsize=9, wrap=True)
+                    fig_ff.tight_layout()
+                    st.pyplot(fig_ff)
+                    plt.close()
 
         # Eksport
         st.divider()
@@ -2000,11 +2146,12 @@ with tab_turbines:
 # =====================================================================
 # TAB 8: EDYTOR LAYOUTU
 # =====================================================================
-with tab_editor:
-    st.header("✏️ Edytor layoutu")
+def _render_editor():
+    st.subheader("✏️ Edytor layoutu")
     st.caption(
         "Wybierz liczbę turbin i startowy układ — współrzędne wygenerują się automatycznie. "
-        "Edytuj wartości w tabeli, potem kliknij **Oblicz AEP**."
+        "Edytuj wartości w tabeli, nazwij i kliknij **Dodaj do biblioteki**, "
+        "albo policz AEP."
     )
 
     col_ctrl, col_viz = st.columns([1, 2])
@@ -2080,35 +2227,40 @@ with tab_editor:
             ed_xs = pts_x[idx] - pts_x[idx].min()
             ed_ys = pts_y[idx] - pts_y[idx].min()
 
-        # Załaduj do session_state (tylko jeśli parametry się zmieniły)
+        # Załaduj do session_state TYLKO gdy zmienią się parametry generacji.
+        # (Nie nadpisuje danych wczytanych z CSV — te zmieniają tylko editor_df,
+        #  nie ruszając _editor_params_key, więc generacja się nie uruchamia.)
         editor_key = f"{ed_init_layout}_{ed_n_turbines}_{ed_spacing}"
-        if st.session_state.get("_editor_key") != editor_key:
+        if st.session_state.get("_editor_params_key") != editor_key:
             st.session_state["editor_df"] = pd.DataFrame({
                 "turbine_id": range(len(ed_xs)),
                 "x_m": np.round(ed_xs, 1),
                 "y_m": np.round(ed_ys, 1),
             })
-            st.session_state["_editor_key"] = editor_key
+            st.session_state["_editor_params_key"] = editor_key
 
         st.divider()
         st.subheader("Format CSV")
         st.code("turbine_id,x_m,y_m\n0,0.0,0.0\n1,1680.0,0.0\n...", language="csv")
 
-        # Upload CSV
+        # Upload CSV — przetwarzany TYLKO raz (bez pętli rerunów)
         uploaded = st.file_uploader("📂 Wczytaj layout CSV", type=["csv"], key="ed_upload")
         if uploaded is not None:
-            try:
-                up_df = pd.read_csv(uploaded)
-                if "x_m" in up_df.columns and "y_m" in up_df.columns:
-                    up_df["turbine_id"] = range(len(up_df))
-                    st.session_state["editor_df"] = up_df[["turbine_id", "x_m", "y_m"]]
-                    st.session_state["_editor_key"] = "uploaded"
-                    st.success(f"Wczytano {len(up_df)} turbin.")
-                    st.rerun()
-                else:
-                    st.error("CSV musi mieć kolumny: x_m, y_m")
-            except Exception as e:
-                st.error(f"Błąd: {e}")
+            file_id = f"{uploaded.name}_{uploaded.size}"
+            if st.session_state.get("_ed_upload_id") != file_id:
+                try:
+                    up_df = pd.read_csv(uploaded)
+                    if "x_m" in up_df.columns and "y_m" in up_df.columns:
+                        up_df["turbine_id"] = range(len(up_df))
+                        st.session_state["editor_df"] = up_df[["turbine_id", "x_m", "y_m"]]
+                        st.session_state["_ed_upload_id"] = file_id
+                        st.success(f"Wczytano {len(up_df)} turbin z {uploaded.name}.")
+                    else:
+                        st.error("CSV musi mieć kolumny: x_m, y_m")
+                except Exception as e:
+                    st.error(f"Błąd: {e}")
+            else:
+                st.caption(f"📄 Wczytany plik: {uploaded.name} ({len(st.session_state.get('editor_df', []))} turbin)")
 
     with col_viz:
         # Edytor tabeli
@@ -2228,6 +2380,36 @@ with tab_editor:
                 st.session_state["editor_df"].to_csv(index=False),
                 file_name="custom_layout.csv", mime="text/csv",
             )
+
+    # --- Dodaj bieżący layout (z tabeli/CSV) do biblioteki ---
+    st.divider()
+    st.subheader("📚 Dodaj layout do biblioteki")
+    st.caption("Po dodaniu pojawi się w selektorze 'Layout farmy' na górze i będzie używany globalnie.")
+    if "editor_df" in st.session_state:
+        cadd1, cadd2 = st.columns([3, 1])
+        lib_name = cadd1.text_input("Nazwa layoutu", value="moj_layout", key="ed_lib_name")
+        if cadd2.button("📚 Dodaj do biblioteki", key="ed_add_lib", type="primary"):
+            name = lib_name.strip()
+            if not name:
+                st.error("Podaj nazwę.")
+            elif name in ["grid", "staggered", "circular", "parallelogram"]:
+                st.error("Ta nazwa jest zarezerwowana dla typu parametrycznego — wybierz inną.")
+            else:
+                df_lib = st.session_state["editor_df"]
+                st.session_state.setdefault("layout_lib", {})[name] = {
+                    "x": [float(v) for v in df_lib["x_m"].values],
+                    "y": [float(v) for v in df_lib["y_m"].values],
+                }
+                st.session_state["_pending_layout"] = name
+                st.success(f"Dodano '{name}' ({len(df_lib)} turbin) do biblioteki i ustawiono jako aktywny.")
+                st.rerun()
+
+
+with tab_editor:
+    if st.session_state.get("show_editor"):
+        _render_editor()
+    else:
+        st.caption("Zaznacz '✏️ Pokaż edytor layoutu' powyżej, aby ręcznie edytować lub wczytać layout z CSV.")
 
 
 # =====================================================================

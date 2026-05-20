@@ -14,6 +14,9 @@ from .base import LayoutAlgorithm, AlgorithmResult, evaluate_aep
 class ScipyGradient(LayoutAlgorithm):
     name = "Scipy (gradient)"
     description = "FLORIS LayoutOptimizationScipy — szybki, lokalny."
+    PARAMS = [
+        {"key": "maxiter", "label": "Max iteracji", "type": "int", "min": 10, "max": 200, "default": 50, "step": 10},
+    ]
 
     def run(
         self,

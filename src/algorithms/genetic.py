@@ -30,6 +30,12 @@ def _decode(genome, n):
 class GeneticAlgorithm(LayoutAlgorithm):
     name = "Genetic Algorithm"
     description = "GA z BLX-α crossover + gaussian mutation + elitism."
+    PARAMS = [
+        {"key": "pop_size", "label": "Wielkość populacji", "type": "int", "min": 6, "max": 60, "default": 20, "step": 2},
+        {"key": "mutation_rate", "label": "Prawdopodobieństwo mutacji", "type": "float", "min": 0.0, "max": 1.0, "default": 0.2, "step": 0.05},
+        {"key": "mutation_sigma_D", "label": "Siła mutacji [×D]", "type": "float", "min": 0.1, "max": 2.0, "default": 0.5, "step": 0.1},
+        {"key": "n_elite", "label": "Elita (najlepsi bez zmian)", "type": "int", "min": 0, "max": 6, "default": 2, "step": 1},
+    ]
 
     def run(
         self,
@@ -87,10 +93,11 @@ class GeneticAlgorithm(LayoutAlgorithm):
             new_pop = [population[i].copy() for i in elite_idx]
 
             # Generuj resztę
+            tour_k = min(3, pop_size)  # turniej nie może być większy niż populacja
             while len(new_pop) < pop_size:
                 # Tournament selection
-                i1 = rng.choice(pop_size, 3, replace=False)
-                i2 = rng.choice(pop_size, 3, replace=False)
+                i1 = rng.choice(pop_size, tour_k, replace=False)
+                i2 = rng.choice(pop_size, tour_k, replace=False)
                 p1 = population[i1[np.argmax(fitness[i1])]]
                 p2 = population[i2[np.argmax(fitness[i2])]]
 

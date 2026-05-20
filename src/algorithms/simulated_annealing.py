@@ -18,6 +18,11 @@ from .base import LayoutAlgorithm, AlgorithmResult, evaluate_aep, repair_min_dis
 class SimulatedAnnealing(LayoutAlgorithm):
     name = "Simulated Annealing"
     description = "SA z gaussian perturbation pojedynczych turbin."
+    PARAMS = [
+        {"key": "T0", "label": "Temperatura startowa [% AEP]", "type": "float", "min": 0.1, "max": 5.0, "default": 0.5, "step": 0.1},
+        {"key": "alpha", "label": "Chłodzenie α", "type": "float", "min": 0.80, "max": 0.999, "default": 0.97, "step": 0.005},
+        {"key": "sigma_D", "label": "Sigma perturbacji [×D]", "type": "float", "min": 0.2, "max": 3.0, "default": 1.0, "step": 0.1},
+    ]
 
     def run(
         self,

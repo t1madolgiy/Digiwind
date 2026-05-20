@@ -53,6 +53,9 @@ class LayoutAlgorithm(ABC):
     """Bazowa klasa wszystkich algorytmów optymalizacji layoutu."""
     name: str = "base"
     description: str = ""
+    # Strojalne parametry — UI (Lab algorytmów) generuje z tego suwaki.
+    # Każdy wpis: {"key","label","type" ("int"|"float"),"min","max","default","step"}
+    PARAMS: list[dict] = []
 
     @abstractmethod
     def run(

@@ -21,6 +21,12 @@ from .base import (
 class ParticleSwarm(LayoutAlgorithm):
     name = "Particle Swarm (PSO)"
     description = "Roj cząstek poruszających się w przestrzeni layoutów."
+    PARAMS = [
+        {"key": "n_particles", "label": "Liczba cząstek", "type": "int", "min": 5, "max": 50, "default": 15, "step": 1},
+        {"key": "inertia", "label": "Inercja w", "type": "float", "min": 0.1, "max": 1.2, "default": 0.7, "step": 0.05},
+        {"key": "cognitive", "label": "Składnik kognitywny c1", "type": "float", "min": 0.0, "max": 3.0, "default": 1.5, "step": 0.1},
+        {"key": "social", "label": "Składnik społeczny c2", "type": "float", "min": 0.0, "max": 3.0, "default": 1.5, "step": 0.1},
+    ]
 
     def run(
         self,

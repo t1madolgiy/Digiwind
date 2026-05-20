@@ -122,8 +122,8 @@ class AEPCalculator:
         results = []
 
         for season_name, season_loader in seasons.items():
-            # Przelicz na WindRose
-            wr = season_loader.to_wind_rose()
+            # Przelicz na WindRose — zgrubnie (30°/3 m/s) dla szybkości
+            wr = season_loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
 
             # Ustaw i oblicz
             self.farm.fmodel.set(wind_data=wr)
@@ -185,7 +185,8 @@ class AEPCalculator:
                 timestamps=loader.timestamps[mask],
             )
 
-            wr = month_loader.to_wind_rose()
+            # Zgrubna róża (30°/3 m/s) — 12 przebiegów, więc liczy się szybko
+            wr = month_loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
             self.farm.fmodel.set(wind_data=wr)
             self.farm.run()
 

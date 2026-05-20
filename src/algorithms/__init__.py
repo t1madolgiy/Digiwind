@@ -16,11 +16,13 @@ from .genetic import GeneticAlgorithm
 from .simulated_annealing import SimulatedAnnealing
 from .pso import ParticleSwarm
 from .greedy import GreedyRelocate
+from .differential_evolution import DifferentialEvolution
 
 ALGORITHMS: dict[str, type[LayoutAlgorithm]] = {
     "scipy": ScipyGradient,
     "random_search": RandomSearch,
     "genetic": GeneticAlgorithm,
+    "differential_evolution": DifferentialEvolution,
     "simulated_annealing": SimulatedAnnealing,
     "pso": ParticleSwarm,
     "greedy": GreedyRelocate,
@@ -29,6 +31,6 @@ ALGORITHMS: dict[str, type[LayoutAlgorithm]] = {
 __all__ = [
     "LayoutAlgorithm", "AlgorithmResult", "evaluate_aep", "bounds_from_layout",
     "ALGORITHMS",
-    "ScipyGradient", "RandomSearch", "GeneticAlgorithm",
+    "ScipyGradient", "RandomSearch", "GeneticAlgorithm", "DifferentialEvolution",
     "SimulatedAnnealing", "ParticleSwarm", "GreedyRelocate",
 ]
