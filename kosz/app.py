@@ -100,138 +100,70 @@ st.set_page_config(
 # =====================================================================
 # SIDEBAR
 # =====================================================================
+# Widgety konfiguracyjne są w zakładkach 🌬️ Wiatr / 🔧 Turbiny / 📐 Layout.
+# Tutaj tylko ODCZYTUJEMY wybór z session_state (z wartościami domyślnymi) i
+# budujemy farmę + dane wiatrowe — używane przez WSZYSTKIE pozostałe zakładki.
+_TURB_KEYS = list(TURBINE_LIBRARY.keys())
+_WAKE_KEYS = list(WAKE_MODELS.keys())
+
+
+def _cfg(key, default):
+    return st.session_state.get(key, default)
+
+
 with st.sidebar:
-    st.title("⚙️ Konfiguracja")
-
-    st.header("Turbina")
-    turbine_name = st.selectbox(
-        "Model turbiny",
-        options=list(TURBINE_LIBRARY.keys()),
-        index=2,
-        format_func=lambda x: (
-            f"{TURBINE_LIBRARY[x]['name']} (D={TURBINE_LIBRARY[x]['diameter']:.0f}m)"
-            + (" 🌊" if TURBINE_LIBRARY[x].get("floating") else "")
-            + (" ⭐" if TURBINE_LIBRARY[x].get("custom_yaml") else "")
-        ),
-    )
-    turbine_info = TURBINE_LIBRARY[turbine_name]
-    is_floating = turbine_name in FLOATING_TURBINES or turbine_info.get("floating", False)
-
-    # Floating — parametry fal
-    wave_period = 2.0
-    wave_height = 1.0
-    if is_floating:
-        st.caption("🌊 Turbina pływająca — parametry fal")
-        wave_period = st.select_slider("Okres fali Tp [s]", options=[2, 4], value=2)
-        wave_height = st.select_slider("Wysokość fali Hs [m]", options=[1, 5], value=1)
-
-    st.header("Model wake")
-    wake_model = st.selectbox(
-        "Model śladu aerodynamicznego",
-        options=list(WAKE_MODELS.keys()),
-        index=1,
-        format_func=lambda x: x.upper(),
+    st.title("🌊 DigiWind")
+    st.caption(
+        "Konfigurację ustawiasz w zakładkach:\n\n"
+        "🌬️ **Wiatr** · 🔧 **Turbiny** · 📐 **Layout**\n\n"
+        "Wybór tam obowiązuje we wszystkich pozostałych zakładkach."
     )
 
-    st.header("Layout farmy")
-    layout_type = st.selectbox(
-        "Typ layoutu",
-        options=["grid", "staggered", "circular", "parallelogram"],
-        format_func=lambda x: {
-            "grid": "Siatka regularna",
-            "staggered": "Siatka przesunięta",
-            "circular": "Kołowy",
-            "parallelogram": "Równoległobok (Malisani 2025)",
-        }[x],
-    )
+# --- Turbina ---
+turbine_name = _cfg("cfg_turbine", _TURB_KEYS[2])
+if turbine_name not in TURBINE_LIBRARY:
+    turbine_name = _TURB_KEYS[2]
+turbine_info = TURBINE_LIBRARY[turbine_name]
+is_floating = turbine_name in FLOATING_TURBINES or turbine_info.get("floating", False)
+wave_period = _cfg("cfg_wave_tp", 2.0)
+wave_height = _cfg("cfg_wave_hs", 1.0)
 
-    if layout_type in ["grid", "staggered"]:
-        col1, col2 = st.columns(2)
-        n_rows = col1.number_input("Rzędy", 2, 10, 5)
-        n_cols = col2.number_input("Kolumny", 2, 10, 5)
-    else:
-        n_rows, n_cols = 4, 4
+# --- Model wake ---
+wake_model = _cfg("cfg_wake", _WAKE_KEYS[1])
+if wake_model not in WAKE_MODELS:
+    wake_model = _WAKE_KEYS[1]
 
-    spacing_D = st.slider("Rozstaw [×D]", 4.0, 15.0, 7.0, 0.5)
+# --- Layout ---
+# Oczekująca zmiana layoutu (ustawiana z przycisków biblioteki) — aplikowana
+# TU, przed utworzeniem widgetu selectbox (Streamlit nie pozwala zmieniać
+# session_state widgetu po jego instancjonowaniu).
+if "_pending_layout" in st.session_state:
+    st.session_state["cfg_layout"] = st.session_state.pop("_pending_layout")
+layout_type = _cfg("cfg_layout", "grid")
+n_rows = int(_cfg("cfg_nrows", 5))
+n_cols = int(_cfg("cfg_ncols", 5))
+spacing_D = float(_cfg("cfg_spacing", 7.0))
+stagger_offset = float(_cfg("cfg_offset", 0.5))
+n_ring_turbines = int(_cfg("cfg_ringturb", 12))
+n_rings = int(_cfg("cfg_rings", 2))
+para_n = int(_cfg("para_n", 25))
+para_r1 = float(_cfg("para_r1", 7.0))
+para_r2 = float(_cfg("para_r2", 7.0))
+para_t1 = float(_cfg("para_t1", 88))
+para_t2 = float(_cfg("para_t2", 18))
 
-    if layout_type == "staggered":
-        stagger_offset = st.slider("Offset", 0.0, 1.0, 0.5, 0.1)
-    else:
-        stagger_offset = 0.5
-
-    if layout_type == "circular":
-        n_ring_turbines = st.number_input("Turbin na pierścień", 4, 20, 12)
-        n_rings = st.number_input("Pierścienie", 1, 3, 2)
-    else:
-        n_ring_turbines, n_rings = 12, 2
-
-    # Parallelogram params (Malisani et al. 2025)
-    if layout_type == "parallelogram":
-        st.caption("Parametryzacja wg Malisani et al. (2025)")
-        para_n = st.number_input("Liczba turbin", 4, 100, 25, key="para_n")
-        col_p1, col_p2 = st.columns(2)
-        para_r1 = col_p1.slider("r₁ [×D]", 2.0, 10.0, 7.0, 0.5, key="para_r1")
-        para_r2 = col_p2.slider("r₂ [×D]", 2.0, 10.0, 7.0, 0.5, key="para_r2")
-        para_t1 = col_p1.slider("θ₁ [°]", -89, 89, 88, 1, key="para_t1")
-        para_t2 = col_p2.slider("θ₂ [°]", -89, 89, 18, 1, key="para_t2")
-    else:
-        para_n, para_r1, para_r2, para_t1, para_t2 = 25, 7.0, 7.0, 90, 18
-
-    st.header("Dane wiatrowe")
-    data_source = st.radio(
-        "Źródło danych",
-        ["Mock (Weibull)", "ERA5 (Copernicus)"],
-        horizontal=True,
-        help="ERA5 wymaga cdsapi+xarray+netcdf4 i klucza w ~/.cdsapirc. "
-             "Lokalizacja domyślna: Bałtyk Południowy.",
-    )
-
-    if data_source == "Mock (Weibull)":
-        weibull_A = st.slider("Weibull A [m/s]", 6.0, 14.0, 9.5, 0.5)
-        weibull_k = st.slider("Weibull k", 1.5, 3.0, 2.1, 0.1)
-        col_dir1, col_dir2 = st.columns(2)
-        dominant_direction = col_dir1.slider(
-            "Dominujący kierunek [°]", 0, 359, 240, 10,
-            help="Średni kierunek wiatru (0=N, 90=E, 180=S, 270=W). "
-                 "Bałtyk Południowy: ~240° (SW–W).",
-        )
-        direction_spread = col_dir2.slider(
-            "Rozrzut kierunku [°]", 10, 120, 60, 5,
-            help="Odchylenie standardowe kierunku. Większa wartość = bardziej "
-                 "rozproszona róża, mniejsza = wąski sektor dominujący.",
-        )
-        n_years = st.selectbox("Lata danych", [1, 2, 3], index=0)
-        era5_lat = 54.5
-        era5_lon = 16.5
-        era5_years = (2023,)
-        era5_hub_input = 150.0
-    else:
-        st.caption(
-            "Pobranie z Copernicus CDS. Pierwsze ściągnięcie trwa kilka minut, "
-            "kolejne są z lokalnego cache w `data/raw/`."
-        )
-        col_lat, col_lon = st.columns(2)
-        era5_lat = col_lat.number_input("Szerokość [°N]", 50.0, 60.0, 54.5, 0.1)
-        era5_lon = col_lon.number_input("Długość [°E]", 10.0, 20.0, 16.5, 0.1)
-        era5_years = tuple(sorted(st.multiselect(
-            "Lata", list(range(2015, 2025)), default=[2023],
-        )))
-        era5_hub_input = float(st.slider("Hub height [m]", 80, 200, 150, 10))
-        # Wartości "ghost" — potrzebne dalej do klucza cache i fallbacku
-        weibull_A = 9.5
-        weibull_k = 2.1
-        dominant_direction = 240
-        direction_spread = 60
-        n_years = 1
-
-    wr_resolution = st.selectbox(
-        "Rozdzielczość WindRose",
-        ["Gruby (30°)", "Dokładny (10°)", "Precyzyjny (5°)"],
-        index=1,
-        help="Wpływa na: (1) binning AEP w FLORIS (więcej sektorów → "
-             "dokładniejszy AEP ale wolniej), (2) liczbę słupków na wykresie "
-             "róży w zakładce 🌬️ Wiatr.",
-    )
+# --- Dane wiatrowe ---
+data_source = _cfg("cfg_datasource", "Mock (Weibull)")
+weibull_A = float(_cfg("cfg_wa", 9.5))
+weibull_k = float(_cfg("cfg_wk", 2.1))
+dominant_direction = int(_cfg("cfg_domdir", 240))
+direction_spread = int(_cfg("cfg_dirspread", 60))
+n_years = int(_cfg("cfg_nyears", 1))
+era5_lat = float(_cfg("cfg_era5lat", 54.5))
+era5_lon = float(_cfg("cfg_era5lon", 16.5))
+era5_years = tuple(_cfg("cfg_era5years", (2023,)))
+era5_hub_input = float(_cfg("cfg_era5hub", 150.0))
+wr_resolution = _cfg("cfg_wrres", "Dokładny (10°)")
 
 
 # =====================================================================
@@ -295,15 +227,50 @@ wd_step = 30.0 if "30" in wr_resolution else (5.0 if "5" in wr_resolution else 1
 ws_step = 3.0 if "30" in wr_resolution else (1.0 if "5" in wr_resolution else 2.0)
 wind_rose = loader.to_wind_rose(wd_step=wd_step, ws_step=ws_step)
 
-farm = FarmModel(
-    wake_model=wake_model,
-    turbine=turbine_name,
-    wind_data=wind_rose,
-    wave_period=wave_period,
-    wave_height=wave_height,
-)
+# =====================================================================
+# GLOBALNY TRYB WIATRU OBLICZENIOWEGO — JEDEN DLA WSZYSTKICH MODUŁÓW
+# =====================================================================
+# eval_wind to dane wiatrowe, na których liczą WSZYSTKIE moduły (Optymalizacja,
+# Lab, Grupa 3, Benchmark, AEP, Flow, Raport...). Ustawiasz je w zakładce 🌬️ Wiatr.
+eval_mode = _cfg("cfg_evalmode", "Wąski bin (1 kierunek × 1 prędkość)")
+eval_wd = float(_cfg("cfg_evalwd", 270.0))
+eval_ws = float(_cfg("cfg_evalws", 9.0))
+eval_ti = float(_cfg("cfg_evalti", 0.06))
 
-if layout_type == "grid":
+if eval_mode.startswith("Pełna"):
+    eval_wind = wind_rose
+    eval_is_narrow = False
+    eval_desc = f"pełna róża wiatrów ({wd_step:.0f}° / {ws_step:.0f} m/s)"
+else:
+    eval_wind = TimeSeries(
+        wind_directions=np.array([eval_wd]),
+        wind_speeds=np.array([eval_ws]),
+        turbulence_intensities=np.array([eval_ti]),
+    )
+    eval_is_narrow = True
+    eval_desc = f"wąski bin — WD={eval_wd:.0f}° · WS={eval_ws:.1f} m/s · TI={eval_ti:.2f}"
+
+@st.cache_resource(show_spinner=False)
+def _get_farm(wake_model, turbine_name, wave_period, wave_height):
+    """Buduje FlorisModel RAZ na (wake, turbina, fale). Drogie ładowanie YAML/FLORIS
+    jest cache'owane — bez tego budowałoby się przy każdym kliknięciu."""
+    return FarmModel(
+        wake_model=wake_model, turbine=turbine_name,
+        wave_period=wave_period, wave_height=wave_height,
+    )
+
+farm = _get_farm(wake_model, turbine_name, wave_period, wave_height)
+
+# Layout + wiatr aplikowane co rerun (tanie) — resetuje też ewentualne mutacje
+# pozostawione przez inne zakładki na współdzielonym (cache'owanym) obiekcie.
+_layout_lib = st.session_state.get("layout_lib", {})
+if layout_type in _layout_lib:
+    _ll = _layout_lib[layout_type]
+    farm.set_layout_custom(
+        np.asarray(_ll["x"], dtype=float), np.asarray(_ll["y"], dtype=float),
+        name=layout_type,
+    )
+elif layout_type == "grid":
     farm.set_layout_grid(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D)
 elif layout_type == "staggered":
     farm.set_layout_staggered(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D, offset=stagger_offset)
@@ -315,18 +282,37 @@ elif layout_type == "parallelogram":
         theta1_deg=float(para_t1), theta2_deg=float(para_t2),
     )
 
-farm.set_wind_data(wind_rose)
-farm.run()
-aep = farm.get_aep_gwh()
-rated_total = turbine_info["rated_power"] * farm.n_turbines
-cf = aep / (rated_total * 8.76) * 100 if rated_total > 0 else 0
+farm.set_wind_data(eval_wind)
 
-# --- Config key do czyszczenia session_state ---
+# Defensywny reset stanu operacyjnego współdzielonej (cache'owanej) farmy:
+# czyści ewentualne yaw / disable_turbines / power_setpoints pozostawione przez
+# Grupę 3 (curtailment/yaw) w poprzednim rerunie, żeby nie psuły innych zakładek.
+try:
+    farm.fmodel.reset_operation()
+except Exception:
+    pass
 _data_part = (
     f"era5_{era5_lat}_{era5_lon}_{era5_years}_{era5_hub_input}"
     if era5_active else f"mock_{weibull_A}_{weibull_k}_{n_years}_{dominant_direction}_{direction_spread}"
 )
-_config_key = f"{turbine_name}_{wake_model}_{layout_type}_{spacing_D}_{n_rows}_{n_cols}_{_data_part}"
+_config_key = (
+    f"{turbine_name}_{wake_model}_{layout_type}_{spacing_D}_{n_rows}_{n_cols}_{_data_part}"
+    f"_eval{eval_mode}_{eval_wd}_{eval_ws}_{eval_ti}"
+)
+
+# AEP liczone TYLKO gdy konfiguracja się zmieniła. Przy zwykłym kliknięciu
+# (np. zmiana zakładki/suwaka w innym module) bierzemy z cache → brak FLORIS run.
+if st.session_state.get("_aep_key") == _config_key and "_aep_val" in st.session_state:
+    aep = st.session_state["_aep_val"]
+else:
+    farm.run()
+    aep = farm.get_aep_gwh()
+    st.session_state["_aep_key"] = _config_key
+    st.session_state["_aep_val"] = aep
+
+rated_total = turbine_info["rated_power"] * farm.n_turbines
+cf = aep / (rated_total * 8.76) * 100 if rated_total > 0 else 0
+
 if st.session_state.get("_prev_config") != _config_key:
     # Konfiguracja się zmieniła — wyczyść stare wyniki
     keys_to_clear = [k for k in st.session_state.keys()
@@ -339,20 +325,208 @@ if st.session_state.get("_prev_config") != _config_key:
 
 
 # =====================================================================
+# GLOBALNY PASEK STATUSU (zawsze widoczny nad zakładkami)
+# =====================================================================
+st.title("🌊 DigiWind — optymalizacja farm wiatrowych")
+_sb1, _sb2, _sb3, _sb4, _sb5 = st.columns(5)
+_sb1.metric("Turbina", turbine_info["name"])
+_sb2.metric("Layout", f"{farm.n_turbines} turbin")
+_sb3.metric("Moc", f"{rated_total:.0f} MW")
+_sb4.metric("AEP", f"{aep:.1f} GWh")
+_sb5.metric("Capacity Factor", f"{cf:.1f}%")
+st.caption(
+    f"⚙️ Model wake: **{wake_model.upper()}** · "
+    f"🌬️ Wiatr obliczeniowy: **{eval_desc}** · "
+    f"📊 Dane: **{'ERA5' if era5_active else 'Mock (Weibull)'}**"
+    + ("  — ⚠️ wąski bin: AEP to wskaźnik 1 warunku, nie roczny" if eval_is_narrow else "")
+)
+st.divider()
+
+
+# =====================================================================
 # TABS
 # =====================================================================
-(tab_overview, tab_wind, tab_flow, tab_compare, tab_benchmark, tab_optimize,
- tab_lab, tab_group3, tab_aep, tab_turbines, tab_editor, tab_3d, tab_report, tab_export) = st.tabs([
-    "📊 Przegląd", "🌬️ Wiatr", "🌊 Flow field",
-    "⚖️ Porównania", "🏆 Benchmark", "🎯 Optymalizacja",
-    "🧪 Lab algorytmów", "🤝 Grupa 3",
-    "⚡ AEP", "🔧 Turbiny", "✏️ Edytor", "🌐 3D", "📄 Raport", "📁 Eksport",
+(tab_wind, tab_turbines, tab_layout, tab_compare, tab_benchmark, tab_optimize,
+ tab_group3, tab_aep, tab_3d, tab_report, tab_trash) = st.tabs([
+    "🌬️ Wiatr", "🔧 Turbiny", "📐 Layout", "⚖️ Porównania", "🏆 Benchmark",
+    "🎯 Optymalizacja", "🤝 Grupa 3", "⚡ AEP", "🌐 3D",
+    "📄 Raport / Eksport", "🗑️ Śmietnik",
 ])
+
+# Aliasy starych nazw → nowe (scalone) zakładki. Dzięki temu wszystkie istniejące
+# bloki `with tab_X:` renderują się do właściwej, połączonej zakładki bez przenoszenia kodu.
+tab_overview = tab_trash      # Przegląd → Śmietnik
+tab_flow = tab_trash          # Flow field (1 bin) → Śmietnik
+tab_lab = tab_optimize        # Lab algorytmów → Optymalizacja
+tab_editor = tab_layout       # Edytor layoutu → Layout
+tab_export = tab_report       # Eksport → Raport / Eksport
+
+
+# =====================================================================
+# KONFIGURACJA W ZAKŁADKACH 1–3 (widgety zapisują do session_state cfg_*)
+# =====================================================================
+with tab_wind:
+    st.header("🌬️ Dane wiatrowe")
+    st.caption("Źródło i parametry wiatru. Wybór obowiązuje we wszystkich zakładkach.")
+    st.radio(
+        "Źródło danych", ["Mock (Weibull)", "ERA5 (Copernicus)"],
+        horizontal=True, key="cfg_datasource",
+        help="ERA5 wymaga cdsapi+xarray+netcdf4 i klucza w ~/.cdsapirc. "
+             "Dla ERA5 nie zmieniasz parametrów Weibulla — dane są realne.",
+    )
+    if st.session_state.get("cfg_datasource", "Mock (Weibull)") == "Mock (Weibull)":
+        cwa, cwk = st.columns(2)
+        cwa.slider("Weibull A [m/s]", 6.0, 14.0, 9.5, 0.5, key="cfg_wa")
+        cwk.slider("Weibull k", 1.5, 3.0, 2.1, 0.1, key="cfg_wk")
+        cdd, cds = st.columns(2)
+        cdd.slider(
+            "Dominujący kierunek [°]", 0, 359, 240, 10, key="cfg_domdir",
+            help="Średni kierunek wiatru (0=N, 90=E, 180=S, 270=W). Bałtyk: ~240°.",
+        )
+        cds.slider(
+            "Rozrzut kierunku [°]", 10, 120, 60, 5, key="cfg_dirspread",
+            help="σ kierunku. Większy = bardziej rozproszona róża, mniejszy = wąski sektor.",
+        )
+        st.selectbox("Lata danych", [1, 2, 3], index=0, key="cfg_nyears")
+    else:
+        st.caption(
+            "Pobranie z Copernicus CDS. Pierwsze ściągnięcie trwa kilka minut, "
+            "kolejne są z lokalnego cache w `data/raw/`."
+        )
+        cla, clo = st.columns(2)
+        cla.number_input("Szerokość [°N]", 50.0, 60.0, 54.5, 0.1, key="cfg_era5lat")
+        clo.number_input("Długość [°E]", 10.0, 20.0, 16.5, 0.1, key="cfg_era5lon")
+        st.multiselect("Lata", list(range(2015, 2025)), default=[2023], key="cfg_era5years")
+        st.slider("Hub height [m]", 80, 200, 150, 10, key="cfg_era5hub")
+    st.selectbox(
+        "Rozdzielczość WindRose",
+        ["Gruby (30°)", "Dokładny (10°)", "Precyzyjny (5°)"],
+        index=1, key="cfg_wrres",
+        help="Wpływa na binning AEP w FLORIS oraz liczbę słupków na róży poniżej.",
+    )
+
+    st.divider()
+    st.subheader("⚙️ Wiatr obliczeniowy — wspólny dla WSZYSTKICH modułów")
+    st.caption(
+        "To ustawienie decyduje na jakim wietrze liczą Optymalizacja, Lab, "
+        "Grupa 3, Benchmark, AEP itd. Jeden wybór — spójnie wszędzie."
+    )
+    st.radio(
+        "Tryb obliczeń",
+        ["Wąski bin (1 kierunek × 1 prędkość)", "Pełna róża wiatrów"],
+        key="cfg_evalmode",
+        help="Wąski bin = szybko, jeden punkt pracy (do strojenia i porównań). "
+             "Pełna róża = realny AEP roczny, wolniej.",
+    )
+    if st.session_state.get("cfg_evalmode", "Wąski bin (1 kierunek × 1 prędkość)").startswith("Wąski"):
+        ce1, ce2, ce3 = st.columns(3)
+        ce1.slider("Kierunek WD [°]", 0.0, 359.0, 270.0, 10.0, key="cfg_evalwd")
+        ce2.slider("Prędkość WS [m/s]", 3.0, 20.0, 9.0, 0.5, key="cfg_evalws")
+        ce3.slider("Turbulencja TI", 0.02, 0.20, 0.06, 0.01, key="cfg_evalti")
+    st.divider()
+
+with tab_turbines:
+    st.header("🔧 Turbiny")
+    st.selectbox(
+        "Model turbiny (aktywny — używany wszędzie)",
+        options=_TURB_KEYS, index=2, key="cfg_turbine",
+        format_func=lambda x: (
+            f"{TURBINE_LIBRARY[x]['name']} (D={TURBINE_LIBRARY[x]['diameter']:.0f}m)"
+            + (" 🌊" if TURBINE_LIBRARY[x].get("floating") else "")
+            + (" ⭐" if TURBINE_LIBRARY[x].get("custom_yaml") else "")
+        ),
+    )
+    _ti_sel = st.session_state.get("cfg_turbine", _TURB_KEYS[2])
+    if _ti_sel in FLOATING_TURBINES or TURBINE_LIBRARY.get(_ti_sel, {}).get("floating"):
+        st.caption("🌊 Turbina pływająca — parametry fal")
+        ctp, chs = st.columns(2)
+        ctp.select_slider("Okres fali Tp [s]", options=[2, 4], value=2, key="cfg_wave_tp")
+        chs.select_slider("Wysokość fali Hs [m]", options=[1, 5], value=1, key="cfg_wave_hs")
+    st.divider()
+
+with tab_layout:
+    st.header("📐 Layout farmy")
+    st.selectbox(
+        "Model wake (aktywny — używany wszędzie)",
+        options=_WAKE_KEYS, index=1, key="cfg_wake",
+        format_func=lambda x: x.upper(),
+    )
+
+    # --- Wybór layoutu: typy parametryczne + biblioteka (z edytora/CSV) ---
+    _lib = st.session_state.setdefault("layout_lib", {})
+    _param_types = ["grid", "staggered", "circular", "parallelogram"]
+    _layout_options = _param_types + list(_lib.keys())
+    _param_labels = {
+        "grid": "Siatka regularna", "staggered": "Siatka przesunięta",
+        "circular": "Kołowy", "parallelogram": "Równoległobok (Malisani 2025)",
+    }
+    st.selectbox(
+        "Layout farmy (aktywny — używany wszędzie)",
+        options=_layout_options, key="cfg_layout",
+        format_func=lambda x: _param_labels.get(x, f"📚 {x} (biblioteka)"),
+    )
+    _lt_sel = st.session_state.get("cfg_layout", "grid")
+
+    if _lt_sel in ["grid", "staggered"]:
+        cnr, cnc = st.columns(2)
+        cnr.number_input("Rzędy", 2, 15, 5, key="cfg_nrows")
+        cnc.number_input("Kolumny", 2, 15, 5, key="cfg_ncols")
+    if _lt_sel in _param_types:
+        st.slider("Rozstaw [×D]", 4.0, 15.0, 7.0, 0.5, key="cfg_spacing")
+    if _lt_sel == "staggered":
+        st.slider("Offset", 0.0, 1.0, 0.5, 0.1, key="cfg_offset")
+    if _lt_sel == "circular":
+        crt, crn = st.columns(2)
+        crt.number_input("Turbin na pierścień", 4, 20, 12, key="cfg_ringturb")
+        crn.number_input("Pierścienie", 1, 3, 2, key="cfg_rings")
+    if _lt_sel == "parallelogram":
+        st.caption("Parametryzacja wg Malisani et al. (2025)")
+        st.number_input("Liczba turbin", 4, 100, 25, key="para_n")
+        cp1, cp2 = st.columns(2)
+        cp1.slider("r₁ [×D]", 2.0, 10.0, 7.0, 0.5, key="para_r1")
+        cp2.slider("r₂ [×D]", 2.0, 10.0, 7.0, 0.5, key="para_r2")
+        cp1.slider("θ₁ [°]", -89, 89, 88, 1, key="para_t1")
+        cp2.slider("θ₂ [°]", -89, 89, 18, 1, key="para_t2")
+    if _lt_sel in _lib:
+        cdl1, cdl2 = st.columns([3, 1])
+        cdl1.caption(f"📚 Layout z biblioteki: **{_lt_sel}** ({len(_lib[_lt_sel]['x'])} turbin) — współrzędne stałe.")
+        if cdl2.button("🗑️ Usuń z biblioteki", key="del_lib_layout"):
+            del _lib[_lt_sel]
+            st.session_state["_pending_layout"] = "grid"
+            st.rerun()
+
+    # --- Podgląd aktywnego layoutu (grafika) ---
+    st.subheader("Podgląd aktywnego layoutu")
+    fig_act, ax_act = plt.subplots(figsize=(5, 4))
+    ax_act.scatter(farm.layout_x, farm.layout_y, s=35, c="#1e5c3a",
+                   edgecolors="white", linewidths=0.8, zorder=5)
+    for i, (xx, yy) in enumerate(zip(farm.layout_x, farm.layout_y)):
+        ax_act.annotate(str(i), (xx, yy), textcoords="offset points",
+                        xytext=(4, 4), fontsize=6, color="#4a4a45")
+    ax_act.set_xlabel("X [m]", fontsize=8)
+    ax_act.set_ylabel("Y [m]", fontsize=8)
+    ax_act.tick_params(labelsize=7)
+    ax_act.set_aspect("equal")
+    ax_act.grid(True, alpha=0.3)
+    ax_act.set_title(f"{_param_labels.get(_lt_sel, _lt_sel)} — {farm.n_turbines} turbin", fontsize=10)
+    cprev, _ = st.columns([1, 1])
+    with cprev:
+        st.pyplot(fig_act, use_container_width=True)
+    plt.close()
+
+    st.divider()
+    st.checkbox("✏️ Pokaż edytor layoutu (ręczna edycja + wczytanie CSV)", key="show_editor")
 
 
 # =====================================================================
 # TAB 1: PRZEGLĄD
 # =====================================================================
+with tab_trash:
+    st.info(
+        "🗑️ **Śmietnik** — sekcje wycofane z głównej nawigacji, ale nadal działające: "
+        "**Przegląd farmy** i **Flow field (pojedynczy bin)**. Nic nie usunięto."
+    )
+
 with tab_overview:
     st.header("Przegląd farmy wiatrowej")
 
@@ -410,7 +584,7 @@ with tab_overview:
 # TAB 2: DANE WIATROWE
 # =====================================================================
 with tab_wind:
-    st.header("Dane wiatrowe")
+    st.subheader("📊 Podgląd wybranych danych wiatrowych")
 
     if era5_active:
         st.caption(
@@ -469,7 +643,7 @@ with tab_flow:
                 wind_direction=ff_wd, wind_speed=ff_ws, ti=ff_ti, figsize=(14, 6),
             )
             st.session_state["fig_flow"] = fig_to_bytes(fig)
-            farm.set_wind_data(wind_rose)
+            farm.set_wind_data(eval_wind)
 
     show_stored_fig("fig_flow")
 
@@ -490,7 +664,7 @@ with tab_flow:
         fig.suptitle("Które turbiny widzą ślad których?", fontsize=14)
         fig.tight_layout()
         st.session_state["fig_waking"] = fig_to_bytes(fig)
-        farm.set_wind_data(wind_rose)
+        farm.set_wind_data(eval_wind)
 
     show_stored_fig("fig_waking")
 
@@ -518,14 +692,14 @@ with tab_compare:
                 results = {}
                 for m in models_to_compare:
                     farm.switch_wake_model(m)
-                    farm.set_wind_data(wind_rose)
+                    farm.set_wind_data(eval_wind)
                     farm.run()
                     results[m.upper()] = {
                         "AEP [GWh]": farm.get_aep_gwh(),
                         "Wake losses [%]": farm.get_wake_losses_percent(),
                     }
                 farm.switch_wake_model(wake_model)
-                farm.set_wind_data(wind_rose)
+                farm.set_wind_data(eval_wind)
 
                 df = pd.DataFrame(results).T
                 st.session_state["df_wake_cmp"] = df
@@ -566,7 +740,7 @@ with tab_compare:
                     farm.set_layout_staggered(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D, offset=stagger_offset)
                 elif layout_type == "parallelogram":
                     farm.set_layout_parallelogram(n_turbines=para_n, r1_D=para_r1, r2_D=para_r2, theta1_deg=float(para_t1), theta2_deg=float(para_t2))
-                farm.set_wind_data(wind_rose)
+                farm.set_wind_data(eval_wind)
 
                 rows = [v for v in results.values() if "error" not in v]
                 st.session_state["df_turb_cmp"] = pd.DataFrame(rows)
@@ -612,7 +786,7 @@ with tab_compare:
                     farm.set_layout_staggered(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D, offset=stagger_offset)
                 elif layout_type == "parallelogram":
                     farm.set_layout_parallelogram(n_turbines=para_n, r1_D=para_r1, r2_D=para_r2, theta1_deg=float(para_t1), theta2_deg=float(para_t2))
-                farm.set_wind_data(wind_rose)
+                farm.set_wind_data(eval_wind)
 
         show_stored_fig("fig_spacing")
         if "txt_spacing" in st.session_state:
@@ -624,15 +798,15 @@ with tab_compare:
 # =====================================================================
 with tab_benchmark:
     st.header("🏆 Benchmark — porównanie konfiguracji")
+    st.caption(f"🌬️ Wiatr obliczeniowy: **{eval_desc}** (zmień w zakładce 🌬️ Wiatr)")
     st.caption(
         "Porównanie wielu konfiguracji naraz: modele wake × layouty × spacing. "
-        "Parametry wiatru ustawiasz tutaj (niezależnie od sidebara)."
+        "Dane wiatrowe są **te same co wybrane w zakładce 🌬️ Wiatr** "
+        "(spójne z resztą aplikacji)."
     )
 
     # --- Kontrolki na górze ---
-    col_bw1, col_bw2, col_bw3, col_bw4 = st.columns(4)
-    bm_weibull_A = col_bw1.slider("Weibull A [m/s]", 6.0, 14.0, 9.5, 0.5, key="bm_wa")
-    bm_weibull_k = col_bw2.slider("Weibull k", 1.5, 3.0, 2.1, 0.1, key="bm_wk")
+    col_bw3, col_bw4 = st.columns(2)
     bm_n_turb = col_bw3.number_input("Turbin (siatka)", 4, 100, 25, key="bm_nt")
     bm_turbine = col_bw4.selectbox(
         "Turbina",
@@ -667,11 +841,9 @@ with tab_benchmark:
 
     if st.button("🏆 Uruchom benchmark", key="run_benchmark", type="primary"):
         with st.spinner("Benchmark w toku..."):
-            # Wygeneruj dane wiatrowe dla benchmarku
-            bm_config = BalticWindConfig(weibull_A=bm_weibull_A, weibull_k=bm_weibull_k)
-            bm_loader = WindDataLoader()
-            bm_loader.generate_mock_data(config=bm_config, seed=42)
-            bm_wr = bm_loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
+            # Dane wiatrowe spójne z resztą aplikacji (zakładka 🌬️ Wiatr).
+            # Zgrubny binning (30°/3 m/s) dla szybkości benchmarku.
+            bm_wr = eval_wind
 
             D_bm = TURBINE_LIBRARY[bm_turbine]["diameter"]
             n_bm = bm_n_turb
@@ -770,7 +942,8 @@ with tab_benchmark:
 
                     fig_bm.suptitle(
                         f"Benchmark — {TURBINE_LIBRARY[bm_turbine]['name']} | "
-                        f"Weibull A={bm_weibull_A} k={bm_weibull_k}",
+                        f"wiatr: {'ERA5' if era5_active else 'Mock'} "
+                        f"({'realny' if era5_active else f'A={weibull_A:.1f} k={weibull_k:.1f}'})",
                         fontsize=13,
                     )
                     fig_bm.tight_layout()
@@ -985,6 +1158,7 @@ with tab_benchmark:
 # =====================================================================
 with tab_optimize:
     st.header("Optymalizacja layoutu")
+    st.caption(f"🌬️ Wiatr obliczeniowy: **{eval_desc}** (zmień w zakładce 🌬️ Wiatr)")
     st.caption(
         "Optymalizacja FLORIS dla pełnej róży wiatrów. "
         "Do porównywania algorytmów na wąskim binie użyj zakładki **🧪 Lab algorytmów**. "
@@ -1003,7 +1177,7 @@ with tab_optimize:
 
         if st.button("🎯 Optymalizuj layout", key="opt_scipy"):
             with st.spinner(f"Optymalizacja Scipy ({opt_maxiter} iteracji)..."):
-                wr_coarse = loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
+                wr_coarse = eval_wind
                 farm.set_wind_data(wr_coarse)
 
                 opt = Optimizer(farm)
@@ -1023,7 +1197,7 @@ with tab_optimize:
                 st.session_state["fig_opt"] = fig_to_bytes(fig)
 
                 opt.apply_result(result)
-                farm.set_wind_data(wind_rose)
+                farm.set_wind_data(eval_wind)
                 farm.run()
                 st.session_state["opt_final_aep"] = farm.get_aep_gwh()
 
@@ -1043,7 +1217,7 @@ with tab_optimize:
 
         if st.button("🎯 Optymalizuj layout (RS)", key="opt_rs"):
             with st.spinner(f"Random Search ({rs_seconds}s)..."):
-                wr_coarse = loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
+                wr_coarse = eval_wind
                 farm.set_wind_data(wr_coarse)
 
                 opt = Optimizer(farm)
@@ -1061,7 +1235,7 @@ with tab_optimize:
                     fig = opt.plot_optimization_result(result)
                     st.session_state["fig_opt_rs"] = fig_to_bytes(fig)
                     opt.apply_result(result)
-                    farm.set_wind_data(wind_rose)
+                    farm.set_wind_data(eval_wind)
                     farm.run()
                 except Exception as e:
                     st.session_state["opt_rs_error"] = str(e)
@@ -1090,17 +1264,18 @@ with tab_lab:
         "Każdy algorytm to osobny plik w `src/algorithms/`."
     )
 
-    # --- Konfiguracja warunków ---
+    # --- Konfiguracja warunków (z globalnego wiatru obliczeniowego) ---
     st.subheader("1. Warunki testowe (wąski bin)")
-    col_wd, col_ws, col_ti = st.columns(3)
-    lab_wd = col_wd.slider("Kierunek WD [°]", 0.0, 350.0, 270.0, 10.0, key="lab_wd")
-    lab_ws = col_ws.slider("Prędkość WS [m/s]", 4.0, 18.0, 9.0, 0.5, key="lab_ws")
-    lab_ti = col_ti.slider("TI", 0.02, 0.15, 0.06, 0.01, key="lab_ti")
+    lab_wd, lab_ws, lab_ti = eval_wd, eval_ws, eval_ti
+    st.info(
+        f"Lab zawsze testuje na **wąskim binie** ustawionym globalnie w zakładce "
+        f"🌬️ Wiatr: **WD={lab_wd:.0f}° · WS={lab_ws:.1f} m/s · TI={lab_ti:.2f}**."
+    )
 
     st.subheader("2. Farma startowa")
     col_r, col_c, col_sp = st.columns(3)
-    lab_n_rows = int(col_r.number_input("Rzędy", 2, 6, 3, 1, key="lab_nr"))
-    lab_n_cols = int(col_c.number_input("Kolumny", 2, 6, 3, 1, key="lab_nc"))
+    lab_n_rows = int(col_r.number_input("Rzędy", 2, 12, 3, 1, key="lab_nr"))
+    lab_n_cols = int(col_c.number_input("Kolumny", 2, 12, 3, 1, key="lab_nc"))
     lab_spacing_D = col_sp.slider("Spacing startowy [×D]", 4.0, 12.0, 7.0, 0.5, key="lab_sp")
 
     st.subheader("3. Ograniczenia + budżet")
@@ -1114,10 +1289,35 @@ with tab_lab:
     lab_selected = st.multiselect(
         "Wybierz algorytmy (każdy w osobnym pliku src/algorithms/)",
         list(ALGORITHMS.keys()),
-        default=["scipy", "random_search", "genetic", "simulated_annealing"],
+        default=["scipy", "random_search", "genetic", "differential_evolution", "simulated_annealing"],
         format_func=lambda k: ALGORITHMS[k].name,
         key="lab_sel",
     )
+
+    # --- Strojenie parametrów per algorytm (z PARAMS każdej klasy) ---
+    lab_algo_params = {}
+    tunable = [k for k in lab_selected if getattr(ALGORITHMS[k], "PARAMS", [])]
+    if tunable:
+        st.subheader("4b. Parametry algorytmów (opcjonalnie)")
+        for algo_key in tunable:
+            cls = ALGORITHMS[algo_key]
+            with st.expander(f"⚙️ {cls.name} — parametry"):
+                pvals = {}
+                pcols = st.columns(min(len(cls.PARAMS), 3))
+                for pi, spec in enumerate(cls.PARAMS):
+                    col = pcols[pi % len(pcols)]
+                    wkey = f"labp_{algo_key}_{spec['key']}"
+                    if spec["type"] == "int":
+                        pvals[spec["key"]] = int(col.number_input(
+                            spec["label"], int(spec["min"]), int(spec["max"]),
+                            int(spec["default"]), int(spec.get("step", 1)), key=wkey,
+                        ))
+                    else:
+                        pvals[spec["key"]] = float(col.slider(
+                            spec["label"], float(spec["min"]), float(spec["max"]),
+                            float(spec["default"]), float(spec.get("step", 0.1)), key=wkey,
+                        ))
+                lab_algo_params[algo_key] = pvals
 
     if st.button("🚀 Uruchom porównanie", key="lab_run", type="primary",
                  disabled=len(lab_selected) == 0):
@@ -1154,6 +1354,7 @@ with tab_lab:
 
                 res = algo.run(
                     lab_farm, bounds, min_dist, lab_eval_budget, seed=lab_seed,
+                    **lab_algo_params.get(algo_key, {}),
                 )
                 results.append(res)
             except Exception as e:
@@ -1284,6 +1485,39 @@ with tab_lab:
             st.pyplot(fig_lay)
             plt.close()
 
+        # Flow field (wake) przed/po — opcjonalne (kosztowne: 2 renders × algorytm)
+        st.divider()
+        st.subheader("🌊 Wake (flow field) — przed vs po")
+        if st.checkbox("Pokaż flow field przed/po dla każdego algorytmu", key="lab_show_ff"):
+            valid_ff = [r for r in results if len(r.final_x) > 0]
+            with st.spinner(f"Generuję flow field dla {len(valid_ff)} algorytmów (WD={eval_wd:.0f}° WS={eval_ws:.1f})..."):
+                for r in valid_ff:
+                    st.markdown(f"**{r.name}** — wiatr: WD={eval_wd:.0f}° · WS={eval_ws:.1f} m/s")
+                    fig_ff, (axb, axa) = plt.subplots(1, 2, figsize=(13, 5))
+                    try:
+                        ff_farm = FarmModel(
+                            wake_model=wake_model, turbine=turbine_name,
+                            wave_period=wave_period, wave_height=wave_height,
+                        )
+                        ff_farm.set_layout_custom(r.initial_x, r.initial_y, name="init")
+                        ff_farm.plot_flow_field(
+                            wind_direction=eval_wd, wind_speed=eval_ws, ti=eval_ti, ax=axb,
+                            title=f"PRZED — {r.initial_aep:.3f} GWh",
+                            show_labels=False, show_wind_arrow=True,
+                        )
+                        ff_farm.set_layout_custom(r.final_x, r.final_y, name="final")
+                        ff_farm.plot_flow_field(
+                            wind_direction=eval_wd, wind_speed=eval_ws, ti=eval_ti, ax=axa,
+                            title=f"PO — {r.final_aep:.3f} GWh (+{r.improvement_pct:.2f}%)",
+                            show_labels=False, show_wind_arrow=True,
+                        )
+                    except Exception as e:
+                        axb.text(0.5, 0.5, f"Błąd: {str(e)[:80]}", transform=axb.transAxes,
+                                 ha="center", va="center", fontsize=9, wrap=True)
+                    fig_ff.tight_layout()
+                    st.pyplot(fig_ff)
+                    plt.close()
+
         # Eksport
         st.divider()
         st.download_button(
@@ -1339,6 +1573,7 @@ ALGORITHMS["moj"] = MojAlgorytm
 # =====================================================================
 with tab_group3:
     st.header("🤝 Grupa 3 — Wake Steering")
+    st.caption(f"🌬️ Wiatr obliczeniowy: **{eval_desc}** (zmień w zakładce 🌬️ Wiatr)")
     st.caption(
         "Temat 3 (sterowanie aerodynamiczne farmy): yaw, hamowanie/derating "
         "upstream, Active Wake Mixing. Wszystko bazuje na layoucie z naszej "
@@ -1409,7 +1644,7 @@ Tabela: brak / yaw / curtailment / helix / kombinacje — AEP, % zmiany AEP, cza
 
         if st.button("🎯 Optymalizuj yaw", key="g3_opt_yaw"):
             with st.spinner("Optymalizacja yaw..."):
-                wr_coarse = loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
+                wr_coarse = eval_wind
                 farm.set_wind_data(wr_coarse)
                 opt = Optimizer(farm)
                 try:
@@ -1425,7 +1660,7 @@ Tabela: brak / yaw / curtailment / helix / kombinacje — AEP, % zmiany AEP, cza
                     st.session_state["g3_fig_yaw"] = fig_to_bytes(fig)
                 except Exception as e:
                     st.session_state["g3_yaw_error"] = str(e)
-                farm.set_wind_data(wind_rose)
+                farm.set_wind_data(eval_wind)
 
         if "g3_yaw_result" in st.session_state:
             r = st.session_state["g3_yaw_result"]
@@ -1443,7 +1678,7 @@ Tabela: brak / yaw / curtailment / helix / kombinacje — AEP, % zmiany AEP, cza
         st.caption("Wykres AEP(yaw_max) dla różnych ograniczeń kąta yaw — pomocne dla Grupy 3.")
         if st.button("📈 Uruchom sweep yaw_max", key="g3_yaw_sweep"):
             with st.spinner("Sweep yaw_max..."):
-                wr_coarse = loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
+                wr_coarse = eval_wind
                 farm.set_wind_data(wr_coarse)
                 sweep_results = []
                 yaw_maxes = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0]
@@ -1458,7 +1693,7 @@ Tabela: brak / yaw / curtailment / helix / kombinacje — AEP, % zmiany AEP, cza
                             sweep_results.append({"yaw_max": ym, "aep": res.optimized_aep_gwh})
                     except Exception as e:
                         sweep_results.append({"yaw_max": ym, "aep": None, "error": str(e)[:40]})
-                farm.set_wind_data(wind_rose)
+                farm.set_wind_data(eval_wind)
                 st.session_state["g3_yaw_sweep"] = sweep_results
 
         if "g3_yaw_sweep" in st.session_state:
@@ -1513,7 +1748,7 @@ Tabela: brak / yaw / curtailment / helix / kombinacje — AEP, % zmiany AEP, cza
                     farm.fmodel.set(disable_turbines=None)
                     farm.fmodel.set_operation_model("simple")
                     farm.fmodel.reset_operation()
-                    farm.set_wind_data(wind_rose)
+                    farm.set_wind_data(eval_wind)
                     farm.run()
                     aep_full = farm.get_aep_gwh()
 
@@ -1540,7 +1775,7 @@ Tabela: brak / yaw / curtailment / helix / kombinacje — AEP, % zmiany AEP, cza
                     farm.fmodel.set(disable_turbines=np.full((n_findex, n_turb), False))
                     farm.fmodel.set_operation_model("simple")
                     farm.fmodel.reset_operation()
-                    farm.set_wind_data(wind_rose)
+                    farm.set_wind_data(eval_wind)
 
                     delta_pct = (aep_curt - aep_full) / aep_full * 100 if aep_full else 0
                     st.session_state["g3_curt_result"] = {
@@ -1615,7 +1850,7 @@ helix_dict["wake"]["enable_active_wake_mixing"] = True
             with st.spinner("Liczę strategie..."):
                 results = []
                 try:
-                    wr_coarse = loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
+                    wr_coarse = eval_wind
                     farm.set_wind_data(wr_coarse)
                     farm.run()
                     aep_base = farm.get_aep_gwh()
@@ -1633,7 +1868,7 @@ helix_dict["wake"]["enable_active_wake_mixing"] = True
                     except Exception as e:
                         results.append({"Strategia": "Yaw (SerialRefine)", "AEP [GWh]": "ERR", "Δ [%]": str(e)[:30]})
 
-                    farm.set_wind_data(wind_rose)
+                    farm.set_wind_data(eval_wind)
                     st.session_state["g3_compare"] = results
                 except Exception as e:
                     st.session_state["g3_compare_error"] = str(e)
@@ -1693,8 +1928,15 @@ helix_dict["wake"]["enable_active_wake_mixing"] = True
 # =====================================================================
 with tab_aep:
     st.header("Analiza AEP")
+    st.caption(f"🌬️ Wiatr obliczeniowy: **{eval_desc}** (zmień w zakładce 🌬️ Wiatr)")
+    if eval_is_narrow:
+        st.warning(
+            "Liczysz na **wąskim binie** (1 punkt pracy) — to NIE jest realny AEP "
+            "roczny, tylko spójny wskaźnik dla jednego warunku. Dla rocznego AEP "
+            "przełącz w 🌬️ Wiatr na **Pełna róża wiatrów**."
+        )
 
-    farm.set_wind_data(wind_rose)
+    farm.set_wind_data(eval_wind)
     farm.run()
     calc = AEPCalculator(farm)
     summary = calc.compute_aep_summary()
@@ -1762,7 +2004,7 @@ with tab_aep:
                 farm.set_layout_grid(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D)
             elif layout_type == "staggered":
                 farm.set_layout_staggered(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D, offset=stagger_offset)
-            farm.set_wind_data(wind_rose)
+            farm.set_wind_data(eval_wind)
 
     show_stored_fig("fig_scenarios")
     show_stored_df("df_scenarios")
@@ -1904,11 +2146,12 @@ with tab_turbines:
 # =====================================================================
 # TAB 8: EDYTOR LAYOUTU
 # =====================================================================
-with tab_editor:
-    st.header("✏️ Edytor layoutu")
+def _render_editor():
+    st.subheader("✏️ Edytor layoutu")
     st.caption(
         "Wybierz liczbę turbin i startowy układ — współrzędne wygenerują się automatycznie. "
-        "Edytuj wartości w tabeli, potem kliknij **Oblicz AEP**."
+        "Edytuj wartości w tabeli, nazwij i kliknij **Dodaj do biblioteki**, "
+        "albo policz AEP."
     )
 
     col_ctrl, col_viz = st.columns([1, 2])
@@ -1984,35 +2227,40 @@ with tab_editor:
             ed_xs = pts_x[idx] - pts_x[idx].min()
             ed_ys = pts_y[idx] - pts_y[idx].min()
 
-        # Załaduj do session_state (tylko jeśli parametry się zmieniły)
+        # Załaduj do session_state TYLKO gdy zmienią się parametry generacji.
+        # (Nie nadpisuje danych wczytanych z CSV — te zmieniają tylko editor_df,
+        #  nie ruszając _editor_params_key, więc generacja się nie uruchamia.)
         editor_key = f"{ed_init_layout}_{ed_n_turbines}_{ed_spacing}"
-        if st.session_state.get("_editor_key") != editor_key:
+        if st.session_state.get("_editor_params_key") != editor_key:
             st.session_state["editor_df"] = pd.DataFrame({
                 "turbine_id": range(len(ed_xs)),
                 "x_m": np.round(ed_xs, 1),
                 "y_m": np.round(ed_ys, 1),
             })
-            st.session_state["_editor_key"] = editor_key
+            st.session_state["_editor_params_key"] = editor_key
 
         st.divider()
         st.subheader("Format CSV")
         st.code("turbine_id,x_m,y_m\n0,0.0,0.0\n1,1680.0,0.0\n...", language="csv")
 
-        # Upload CSV
+        # Upload CSV — przetwarzany TYLKO raz (bez pętli rerunów)
         uploaded = st.file_uploader("📂 Wczytaj layout CSV", type=["csv"], key="ed_upload")
         if uploaded is not None:
-            try:
-                up_df = pd.read_csv(uploaded)
-                if "x_m" in up_df.columns and "y_m" in up_df.columns:
-                    up_df["turbine_id"] = range(len(up_df))
-                    st.session_state["editor_df"] = up_df[["turbine_id", "x_m", "y_m"]]
-                    st.session_state["_editor_key"] = "uploaded"
-                    st.success(f"Wczytano {len(up_df)} turbin.")
-                    st.rerun()
-                else:
-                    st.error("CSV musi mieć kolumny: x_m, y_m")
-            except Exception as e:
-                st.error(f"Błąd: {e}")
+            file_id = f"{uploaded.name}_{uploaded.size}"
+            if st.session_state.get("_ed_upload_id") != file_id:
+                try:
+                    up_df = pd.read_csv(uploaded)
+                    if "x_m" in up_df.columns and "y_m" in up_df.columns:
+                        up_df["turbine_id"] = range(len(up_df))
+                        st.session_state["editor_df"] = up_df[["turbine_id", "x_m", "y_m"]]
+                        st.session_state["_ed_upload_id"] = file_id
+                        st.success(f"Wczytano {len(up_df)} turbin z {uploaded.name}.")
+                    else:
+                        st.error("CSV musi mieć kolumny: x_m, y_m")
+                except Exception as e:
+                    st.error(f"Błąd: {e}")
+            else:
+                st.caption(f"📄 Wczytany plik: {uploaded.name} ({len(st.session_state.get('editor_df', []))} turbin)")
 
     with col_viz:
         # Edytor tabeli
@@ -2103,7 +2351,7 @@ with tab_editor:
                 ed_farm.set_layout_custom(
                     df_ed["x_m"].values, df_ed["y_m"].values, name="editor",
                 )
-                ed_farm.set_wind_data(wind_rose)
+                ed_farm.set_wind_data(eval_wind)
                 ed_farm.run()
                 ed_aep = ed_farm.get_aep_gwh()
                 ed_rated = turbine_info["rated_power"] * len(df_ed)
@@ -2132,6 +2380,36 @@ with tab_editor:
                 st.session_state["editor_df"].to_csv(index=False),
                 file_name="custom_layout.csv", mime="text/csv",
             )
+
+    # --- Dodaj bieżący layout (z tabeli/CSV) do biblioteki ---
+    st.divider()
+    st.subheader("📚 Dodaj layout do biblioteki")
+    st.caption("Po dodaniu pojawi się w selektorze 'Layout farmy' na górze i będzie używany globalnie.")
+    if "editor_df" in st.session_state:
+        cadd1, cadd2 = st.columns([3, 1])
+        lib_name = cadd1.text_input("Nazwa layoutu", value="moj_layout", key="ed_lib_name")
+        if cadd2.button("📚 Dodaj do biblioteki", key="ed_add_lib", type="primary"):
+            name = lib_name.strip()
+            if not name:
+                st.error("Podaj nazwę.")
+            elif name in ["grid", "staggered", "circular", "parallelogram"]:
+                st.error("Ta nazwa jest zarezerwowana dla typu parametrycznego — wybierz inną.")
+            else:
+                df_lib = st.session_state["editor_df"]
+                st.session_state.setdefault("layout_lib", {})[name] = {
+                    "x": [float(v) for v in df_lib["x_m"].values],
+                    "y": [float(v) for v in df_lib["y_m"].values],
+                }
+                st.session_state["_pending_layout"] = name
+                st.success(f"Dodano '{name}' ({len(df_lib)} turbin) do biblioteki i ustawiono jako aktywny.")
+                st.rerun()
+
+
+with tab_editor:
+    if st.session_state.get("show_editor"):
+        _render_editor()
+    else:
+        st.caption("Zaznacz '✏️ Pokaż edytor layoutu' powyżej, aby ręcznie edytować lub wczytać layout z CSV.")
 
 
 # =====================================================================
@@ -2327,7 +2605,7 @@ with tab_3d:
 
                 st.session_state["fig_3d_wind"] = fig3d
 
-                farm.set_wind_data(wind_rose)
+                farm.set_wind_data(eval_wind)
 
             except ImportError:
                 st.error("Plotly nie jest zainstalowany.")
@@ -2346,7 +2624,7 @@ with tab_3d:
             try:
                 import plotly.graph_objects as go
 
-                farm.set_wind_data(wind_rose)
+                farm.set_wind_data(eval_wind)
                 farm.run()
                 powers_per_turbine = farm.get_turbine_powers_mw()
                 # Bezpieczna konwersja — flatten na 1D
@@ -2469,7 +2747,7 @@ with tab_report:
     if st.button("📄 Generuj raport PDF", key="gen_report", type="primary"):
         with st.spinner("Generuję raport PDF..."):
             try:
-                farm.set_wind_data(wind_rose)
+                farm.set_wind_data(eval_wind)
                 farm.run()
 
                 rg = ReportGenerator(farm, loader)
@@ -2518,7 +2796,7 @@ with tab_export:
     st.subheader("AEP CSV — Temat 5")
     if st.button("Generuj AEP export", key="export_aep"):
         with st.spinner("Generuję..."):
-            farm.set_wind_data(wind_rose)
+            farm.set_wind_data(eval_wind)
             calc = AEPCalculator(farm)
             export_df = calc.export_for_team5(
                 "outputs/exports/aep_timeseries.csv", loader=loader,

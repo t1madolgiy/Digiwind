@@ -33,6 +33,27 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Wyciszenie ostrzeżeń FLORIS ("Computing AEP with uniform frequencies").
+# FLORIS przekonfigurowuje logowanie przy tworzeniu modelu, więc ustawienie
+# poziomu trzeba ponawiać po każdym zbudowaniu FlorisModel (patrz _silence_floris).
+# ---------------------------------------------------------------------------
+class _FlorisQuietFilter(logging.Filter):
+    def filter(self, record):
+        return "uniform frequencies" not in record.getMessage().lower()
+
+
+def _silence_floris():
+    lg = logging.getLogger("floris")
+    lg.setLevel(logging.ERROR)
+    for h in lg.handlers:
+        if not any(isinstance(f, _FlorisQuietFilter) for f in h.filters):
+            h.addFilter(_FlorisQuietFilter())
+
+
+_silence_floris()
+
+
+# ---------------------------------------------------------------------------
 # Stałe — dostępne modele i turbiny
 # ---------------------------------------------------------------------------
 
@@ -489,6 +510,7 @@ class FarmModel:
 
         # Stwórz model ze słownika (nie z pliku)
         fmodel = FlorisModel(input_dict)
+        _silence_floris()  # FLORIS mógł przekonfigurować logger — wycisz ponownie
 
         return fmodel
 

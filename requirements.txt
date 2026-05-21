@@ -16,8 +16,9 @@ xarray>=2024.1
 netcdf4>=1.6
 
 # Streamlit (Etap 2 — frontend)
-# streamlit>=1.30    # pip install streamlit
-# plotly>=5.18       # pip install plotly
+streamlit>=1.30      # dashboard / GUI
+plotly>=5.18         # wizualizacje 3D
+reportlab>=4.0       # generowanie raportu PDF
 
 # Development
 jupyter>=1.0

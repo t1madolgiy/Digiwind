@@ -15,6 +15,7 @@ Uruchomienie:
 """
 
 import sys
+import logging
 import warnings
 from pathlib import Path
 from io import BytesIO
@@ -27,6 +28,9 @@ import matplotlib.pyplot as plt
 import streamlit as st
 
 warnings.filterwarnings("ignore")
+# FLORIS loguje przez własny logger (nie Python warnings) — wycisz ostrzeżenia
+# typu "Computing AEP with uniform frequencies" (nieszkodliwe na wąskim binie).
+logging.getLogger("floris").setLevel(logging.ERROR)
 
 sys.path.insert(0, ".")
 from src.wind_data import WindDataLoader, BalticWindConfig
@@ -98,6 +102,43 @@ st.set_page_config(
 )
 
 # =====================================================================
+# LOGOWANIE + ROLE (admin = wszystko, viewer = podstawowe zakładki)
+# =====================================================================
+# Konta: docelowo przenieś do .streamlit/secrets.toml. Tu domyślne dla wygody.
+# Format: login -> (hasło, rola). Rola "admin" widzi wszystko, "viewer" tylko basic.
+USERS = {
+    "admin": ("digiwind2025", "admin"),
+    "gość": ("gosc", "viewer"),
+}
+try:
+    if hasattr(st, "secrets") and "users" in st.secrets:
+        USERS = {u: (d["password"], d.get("role", "viewer")) for u, d in st.secrets["users"].items()}
+except Exception:
+    pass
+
+# Zakładki dostępne dla roli "viewer" (reszta ukryta). Admin widzi wszystkie.
+VIEWER_TABS = {"wind", "turbines", "layout", "aep"}
+
+if "auth_role" not in st.session_state:
+    st.title("🌊 DigiWind — logowanie")
+    st.caption("Zaloguj się, aby uzyskać dostęp do aplikacji.")
+    with st.form("login_form"):
+        _u = st.text_input("Login")
+        _p = st.text_input("Hasło", type="password")
+        _ok = st.form_submit_button("Zaloguj", type="primary")
+    if _ok:
+        if _u in USERS and _p == USERS[_u][0]:
+            st.session_state["auth_role"] = USERS[_u][1]
+            st.session_state["auth_user"] = _u
+            st.rerun()
+        else:
+            st.error("Błędny login lub hasło.")
+    st.stop()
+
+role = st.session_state.get("auth_role", "viewer")
+is_admin = role == "admin"
+
+# =====================================================================
 # SIDEBAR
 # =====================================================================
 # Widgety konfiguracyjne są w zakładkach 🌬️ Wiatr / 🔧 Turbiny / 📐 Layout.
@@ -113,6 +154,13 @@ def _cfg(key, default):
 
 with st.sidebar:
     st.title("🌊 DigiWind")
+    _badge = "👑 admin" if is_admin else "👤 viewer"
+    cu1, cu2 = st.columns([2, 1])
+    cu1.caption(f"Zalogowano: **{st.session_state.get('auth_user','?')}** ({_badge})")
+    if cu2.button("Wyloguj", key="logout_btn"):
+        for _k in ("auth_role", "auth_user"):
+            st.session_state.pop(_k, None)
+        st.rerun()
     st.caption(
         "Konfigurację ustawiasz w zakładkach:\n\n"
         "🌬️ **Wiatr** · 🔧 **Turbiny** · 📐 **Layout**\n\n"
@@ -318,7 +366,8 @@ if st.session_state.get("_prev_config") != _config_key:
     keys_to_clear = [k for k in st.session_state.keys()
                      if k.startswith("fig_") or k.startswith("df_") or k.startswith("txt_")
                      or k in ("opt_result", "opt_final_aep", "yaw_result", "yaw_error",
-                              "ed_results", "report_pdf", "report_ready")]
+                              "ed_results", "report_pdf", "report_ready",
+                              "econ_aep_annual", "econ_aep_error")]
     for k in keys_to_clear:
         del st.session_state[k]
     st.session_state["_prev_config"] = _config_key
@@ -347,9 +396,9 @@ st.divider()
 # TABS
 # =====================================================================
 (tab_wind, tab_turbines, tab_layout, tab_compare, tab_benchmark, tab_optimize,
- tab_group3, tab_aep, tab_3d, tab_report, tab_trash) = st.tabs([
+ tab_group3, tab_aep, tab_econ, tab_3d, tab_report, tab_trash) = st.tabs([
     "🌬️ Wiatr", "🔧 Turbiny", "📐 Layout", "⚖️ Porównania", "🏆 Benchmark",
-    "🎯 Optymalizacja", "🤝 Grupa 3", "⚡ AEP", "🌐 3D",
+    "🎯 Optymalizacja", "🤝 Grupa 3", "⚡ AEP", "💰 Ekonomia (Gr5)", "🌐 3D",
     "📄 Raport / Eksport", "🗑️ Śmietnik",
 ])
 
@@ -360,6 +409,20 @@ tab_flow = tab_trash          # Flow field (1 bin) → Śmietnik
 tab_lab = tab_optimize        # Lab algorytmów → Optymalizacja
 tab_editor = tab_layout       # Edytor layoutu → Layout
 tab_export = tab_report       # Eksport → Raport / Eksport
+
+# Ukrycie zakładek dla roli "viewer" (kontrola na poziomie UI). Kolejność musi
+# odpowiadać liście st.tabs() powyżej.
+_TAB_ORDER = ["wind", "turbines", "layout", "compare", "benchmark", "optimize",
+              "group3", "aep", "econ", "3d", "report", "trash"]
+if not is_admin:
+    _hide_idx = [i + 1 for i, k in enumerate(_TAB_ORDER) if k not in VIEWER_TABS]
+    if _hide_idx:
+        _sel = ", ".join(
+            f'div[data-baseweb="tab-list"] button[data-baseweb="tab"]:nth-child({i})'
+            for i in _hide_idx
+        )
+        st.markdown(f"<style>{_sel} {{ display: none !important; }}</style>",
+                    unsafe_allow_html=True)
 
 
 # =====================================================================
@@ -2008,6 +2071,213 @@ with tab_aep:
 
     show_stored_fig("fig_scenarios")
     show_stored_df("df_scenarios")
+
+
+# =====================================================================
+# TAB: EKONOMIA (Grupa 5) — LCOE / NPV / IRR / payback
+# =====================================================================
+with tab_econ:
+    st.header("💰 Analiza ekonomiczna (Grupa 5)")
+    st.caption(
+        "Opłacalność farmy na bazie rocznego AEP (liczonego na PEŁNEJ róży wiatrów, "
+        "niezależnie od trybu obliczeniowego). Wspiera Task 5 — *annual value production*."
+    )
+    st.info(
+        f"📐 Liczone dla **aktywnej konfiguracji**: turbina **{turbine_info['name']}** "
+        f"({turbine_info['rated_power']} MW) · layout **{layout_type}** · "
+        f"**{farm.n_turbines} turbin** · moc zainstalowana **{rated_total:.0f} MW**. "
+        f"Zmień w zakładkach 🔧 Turbiny / 📐 Layout."
+    )
+
+    # --- Parametry ekonomiczne ---
+    st.subheader("1. Założenia ekonomiczne")
+    ce1, ce2, ce3 = st.columns(3)
+    econ_capex = ce1.number_input("CAPEX [M€/MW]", 1.0, 8.0, 3.5, 0.1, key="econ_capex",
+                                  help="Nakład inwestycyjny na MW. Offshore Bałtyk ~3–4 M€/MW.")
+    econ_opex = ce2.number_input("OPEX [k€/MW/rok]", 20.0, 250.0, 100.0, 5.0, key="econ_opex",
+                                 help="Koszty operacyjne (O&M, serwis) rocznie na MW.")
+    econ_price = ce3.number_input("Cena energii [€/MWh]", 20.0, 250.0, 80.0, 5.0, key="econ_price")
+
+    ce4, ce5, ce6 = st.columns(3)
+    econ_discount = ce4.slider("Stopa dyskonta [%]", 1.0, 15.0, 7.0, 0.5, key="econ_discount") / 100.0
+    econ_life = int(ce5.slider("Żywotność [lata]", 15, 35, 27, 1, key="econ_life"))
+    econ_escal = ce6.slider("Eskalacja ceny [%/rok]", -2.0, 6.0, 1.0, 0.5, key="econ_escal") / 100.0
+
+    ce7, ce8 = st.columns(2)
+    econ_avail = ce7.slider("Dostępność farmy [%]", 80.0, 100.0, 95.0, 0.5, key="econ_avail") / 100.0
+    econ_degr = ce8.slider("Degradacja produkcji [%/rok]", 0.0, 2.0, 0.5, 0.1, key="econ_degr") / 100.0
+
+    st.divider()
+    st.subheader("2. Roczny AEP (pełna róża wiatrów)")
+    st.caption("Ekonomia wymaga rocznego AEP — kliknij, by przeliczyć na pełnej róży.")
+    if st.button("🔄 Przelicz roczny AEP (pełna róża)", key="econ_calc_aep", type="primary"):
+        with st.spinner("Liczę roczny AEP na pełnej róży..."):
+            try:
+                farm.set_wind_data(wind_rose)
+                farm.run()
+                st.session_state["econ_aep_annual"] = float(farm.get_aep_gwh())
+                farm.set_wind_data(eval_wind)
+            except Exception as e:
+                st.session_state["econ_aep_error"] = str(e)
+
+    if "econ_aep_error" in st.session_state:
+        st.error(f"Błąd AEP: {st.session_state['econ_aep_error']}")
+
+    aep_annual = st.session_state.get("econ_aep_annual")
+    if aep_annual is None:
+        st.info("Najpierw kliknij **Przelicz roczny AEP** powyżej.")
+    else:
+        # --- Obliczenia ekonomiczne (czyste, bez FLORIS) ---
+        N = econ_life
+        r = econ_discount
+        rated_mw = rated_total
+        capex_total = econ_capex * 1e6 * rated_mw            # €
+        opex_year = econ_opex * 1e3 * rated_mw               # €/rok
+        years = np.arange(1, N + 1)
+
+        energy_mwh = aep_annual * 1000.0 * econ_avail * (1.0 - econ_degr) ** (years - 1)
+        revenue = energy_mwh * econ_price * (1.0 + econ_escal) ** (years - 1)
+        opex = np.full(N, opex_year)
+        cashflow = revenue - opex                            # €/rok (bez CAPEX)
+
+        disc = 1.0 / (1.0 + r) ** years
+        npv = -capex_total + float(np.sum(cashflow * disc))
+        lcoe = (capex_total + float(np.sum(opex * disc))) / float(np.sum(energy_mwh * disc))
+
+        # IRR — bisekcja
+        def _npv_at(rate):
+            d = 1.0 / (1.0 + rate) ** years
+            return -capex_total + float(np.sum(cashflow * d))
+        irr = None
+        try:
+            lo, hi = -0.5, 1.0
+            if _npv_at(lo) * _npv_at(hi) < 0:
+                for _ in range(100):
+                    mid = (lo + hi) / 2
+                    if _npv_at(mid) > 0:
+                        lo = mid
+                    else:
+                        hi = mid
+                irr = (lo + hi) / 2
+        except Exception:
+            irr = None
+
+        # Payback (niezdyskontowany)
+        cum = np.cumsum(cashflow) - capex_total
+        payback = next((int(years[i]) for i in range(N) if cum[i] > 0), None)
+
+        # --- Metryki ---
+        st.divider()
+        st.subheader("3. Wyniki")
+        cap_factor = aep_annual / (rated_total * 8.76) * 100 if rated_total > 0 else 0
+        st.caption(
+            f"Kontekst: **{farm.n_turbines} turbin × {turbine_info['rated_power']} MW = "
+            f"{rated_total:.0f} MW** · Capacity Factor = **{cap_factor:.1f}%** "
+            f"({aep_annual:.0f} GWh / rok)."
+        )
+        if cap_factor > 60:
+            st.warning(
+                f"⚠️ Capacity Factor {cap_factor:.0f}% jest **nierealistycznie wysoki** "
+                "(offshore zwykle 40–55%). Sprawdź dane wiatru (Weibull A może być za duży) "
+                "lub model turbiny — AEP może być zawyżony."
+            )
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Roczny AEP", f"{aep_annual:.1f} GWh")
+        m2.metric("LCOE", f"{lcoe:.1f} €/MWh")
+        m3.metric("NPV", f"{npv/1e6:.0f} M€")
+        m4.metric("IRR", f"{irr*100:.1f}%" if irr is not None else "—")
+
+        m5, m6, m7, m8 = st.columns(4)
+        m5.metric("CAPEX", f"{capex_total/1e6:.0f} M€")
+        m6.metric("Przychód rok 1", f"{revenue[0]/1e6:.1f} M€")
+        m7.metric("Okres zwrotu", f"{payback} lat" if payback else "> żywotność")
+        m8.metric("Cena vs LCOE", f"{econ_price - lcoe:+.1f} €/MWh",
+                  delta_color="normal" if econ_price >= lcoe else "inverse")
+
+        if npv > 0:
+            st.success(f"✅ Inwestycja opłacalna przy tych założeniach (NPV = {npv/1e6:.0f} M€, "
+                       f"LCOE {lcoe:.1f} < cena {econ_price:.0f} €/MWh).")
+        else:
+            st.warning(f"⚠️ Inwestycja nieopłacalna przy tych założeniach (NPV = {npv/1e6:.0f} M€). "
+                       f"LCOE {lcoe:.1f} €/MWh > cena {econ_price:.0f} €/MWh.")
+
+        # --- Wykres cashflow ---
+        fig_cf, (axcf1, axcf2) = plt.subplots(1, 2, figsize=(13, 4.5))
+        axcf1.bar(years, cashflow / 1e6, color="#1e5c3a", alpha=0.8, label="Cashflow roczny")
+        axcf1.axhline(0, color="black", linewidth=0.6)
+        axcf1.set_xlabel("Rok")
+        axcf1.set_ylabel("Cashflow [M€/rok]")
+        axcf1.set_title("Roczny przepływ pieniężny")
+        axcf1.grid(True, alpha=0.3)
+
+        cum_disc = np.cumsum(cashflow * disc) - capex_total
+        axcf2.plot(years, cum_disc / 1e6, "o-", color="#534AB7", linewidth=2)
+        axcf2.axhline(0, color="#c8531a", linestyle="--", linewidth=1, label="Próg zwrotu")
+        axcf2.set_xlabel("Rok")
+        axcf2.set_ylabel("Skumulowany zdyskontowany [M€]")
+        axcf2.set_title(f"Skumulowany NPV (końcowy: {npv/1e6:.0f} M€)")
+        axcf2.legend(fontsize=8)
+        axcf2.grid(True, alpha=0.3)
+        fig_cf.tight_layout()
+        st.pyplot(fig_cf)
+        plt.close()
+
+        # --- Analiza wrażliwości (tornado) ---
+        st.subheader("4. Analiza wrażliwości NPV")
+        st.caption("Wpływ ±20% zmiany kluczowych założeń na NPV (bazowy NPV w środku).")
+
+        def _npv_with(price=econ_price, capex=econ_capex, aep=aep_annual, disc_rate=r):
+            cap = capex * 1e6 * rated_mw
+            en = aep * 1000.0 * econ_avail * (1.0 - econ_degr) ** (years - 1)
+            rev = en * price * (1.0 + econ_escal) ** (years - 1)
+            cf = rev - opex
+            d = 1.0 / (1.0 + disc_rate) ** years
+            return -cap + float(np.sum(cf * d))
+
+        sens = []
+        for label, lo_val, hi_val in [
+            ("Cena energii", _npv_with(price=econ_price * 0.8), _npv_with(price=econ_price * 1.2)),
+            ("CAPEX", _npv_with(capex=econ_capex * 1.2), _npv_with(capex=econ_capex * 0.8)),
+            ("Roczny AEP", _npv_with(aep=aep_annual * 0.9), _npv_with(aep=aep_annual * 1.1)),
+            ("Stopa dyskonta", _npv_with(disc_rate=r + 0.02), _npv_with(disc_rate=max(r - 0.02, 0.001))),
+        ]:
+            sens.append((label, lo_val / 1e6, hi_val / 1e6))
+
+        fig_t, axt = plt.subplots(figsize=(9, 3.5))
+        base = npv / 1e6
+        for i, (label, lo_v, hi_v) in enumerate(sens):
+            axt.barh(i, hi_v - base, left=base, color="#1e5c3a", alpha=0.7)
+            axt.barh(i, lo_v - base, left=base, color="#c8531a", alpha=0.7)
+        axt.set_yticks(range(len(sens)))
+        axt.set_yticklabels([s[0] for s in sens])
+        axt.axvline(base, color="black", linewidth=1)
+        axt.set_xlabel("NPV [M€]")
+        axt.set_title("Tornado — wrażliwość NPV (zielony = w górę, pomarańcz = w dół)")
+        axt.grid(True, alpha=0.3, axis="x")
+        fig_t.tight_layout()
+        st.pyplot(fig_t)
+        plt.close()
+
+        # --- Eksport dla Grupy 5 ---
+        st.divider()
+        econ_df = pd.DataFrame({
+            "rok": years,
+            "energia_MWh": np.round(energy_mwh, 1),
+            "przychod_EUR": np.round(revenue, 0),
+            "opex_EUR": np.round(opex, 0),
+            "cashflow_EUR": np.round(cashflow, 0),
+            "cashflow_zdyskontowany_EUR": np.round(cashflow * disc, 0),
+        })
+        st.download_button(
+            "⬇️ Eksport cashflow CSV (dla Grupy 5)",
+            econ_df.to_csv(index=False),
+            file_name="economic_cashflow.csv", mime="text/csv",
+        )
+        st.caption(
+            f"Założenia: CAPEX {econ_capex} M€/MW · OPEX {econ_opex} k€/MW/rok · "
+            f"cena {econ_price} €/MWh (+{econ_escal*100:.1f}%/rok) · dyskonto {r*100:.1f}% · "
+            f"{N} lat · dostępność {econ_avail*100:.0f}% · degradacja {econ_degr*100:.1f}%/rok."
+        )
 
 
 # =====================================================================
