@@ -116,7 +116,18 @@ try:
 except Exception:
     pass
 
-# Zakładki dostępne dla roli "viewer" (reszta ukryta). Admin widzi wszystkie.
+# Metadane zakładek (kolejność MUSI odpowiadać st.tabs() niżej).
+TAB_META = [
+    ("wind", "🌬️ Wiatr"), ("turbines", "🔧 Turbiny"), ("layout", "📐 Layout"),
+    ("compare", "⚖️ Porównania"), ("benchmark", "🏆 Benchmark"),
+    ("optimize", "🎯 Optymalizacja"), ("group3", "🤝 Grupa 3"), ("aep", "⚡ AEP"),
+    ("econ", "💰 Ekonomia (Gr5)"), ("3d", "🌐 3D"),
+    ("report", "📄 Raport / Eksport"), ("trash", "🗑️ Śmietnik"),
+]
+TAB_LABELS = dict(TAB_META)
+ALL_TAB_KEYS = [k for k, _ in TAB_META]
+
+# Zakładki dostępne dla roli "viewer" (reszta ukryta). Admin widzi wszystkie / wybiera sam.
 VIEWER_TABS = {"wind", "turbines", "layout", "aep"}
 
 if "auth_role" not in st.session_state:
@@ -166,6 +177,29 @@ with st.sidebar:
         "🌬️ **Wiatr** · 🔧 **Turbiny** · 📐 **Layout**\n\n"
         "Wybór tam obowiązuje we wszystkich pozostałych zakładkach."
     )
+
+    # --- Ustawienia widoku (tylko admin): które karty pokazać ---
+    if is_admin:
+        st.divider()
+        st.subheader("⚙️ Ustawienia widoku")
+        st.caption("Zaznacz karty, które mają być widoczne.")
+        cva, cvb = st.columns(2)
+        if cva.button("✅ Zaznacz wszystkie", key="tabs_all"):
+            st.session_state["_pending_visible"] = list(ALL_TAB_KEYS)
+            st.rerun()
+        if cvb.button("⬜ Tylko podstawowe", key="tabs_basic"):
+            st.session_state["_pending_visible"] = [k for k in ALL_TAB_KEYS if k in VIEWER_TABS]
+            st.rerun()
+        # Zastosuj oczekujący wybór PRZED utworzeniem widgetu multiselect
+        if "_pending_visible" in st.session_state:
+            st.session_state["admin_visible_tabs"] = st.session_state.pop("_pending_visible")
+        st.multiselect(
+            "Pokazane karty",
+            options=ALL_TAB_KEYS,
+            default=list(ALL_TAB_KEYS),
+            format_func=lambda k: TAB_LABELS[k],
+            key="admin_visible_tabs",
+        )
 
 # --- Turbina ---
 turbine_name = _cfg("cfg_turbine", _TURB_KEYS[2])
@@ -396,11 +430,9 @@ st.divider()
 # TABS
 # =====================================================================
 (tab_wind, tab_turbines, tab_layout, tab_compare, tab_benchmark, tab_optimize,
- tab_group3, tab_aep, tab_econ, tab_3d, tab_report, tab_trash) = st.tabs([
-    "🌬️ Wiatr", "🔧 Turbiny", "📐 Layout", "⚖️ Porównania", "🏆 Benchmark",
-    "🎯 Optymalizacja", "🤝 Grupa 3", "⚡ AEP", "💰 Ekonomia (Gr5)", "🌐 3D",
-    "📄 Raport / Eksport", "🗑️ Śmietnik",
-])
+ tab_group3, tab_aep, tab_econ, tab_3d, tab_report, tab_trash) = st.tabs(
+    [lbl for _, lbl in TAB_META]
+)
 
 # Aliasy starych nazw → nowe (scalone) zakładki. Dzięki temu wszystkie istniejące
 # bloki `with tab_X:` renderują się do właściwej, połączonej zakładki bez przenoszenia kodu.
@@ -410,19 +442,20 @@ tab_lab = tab_optimize        # Lab algorytmów → Optymalizacja
 tab_editor = tab_layout       # Edytor layoutu → Layout
 tab_export = tab_report       # Eksport → Raport / Eksport
 
-# Ukrycie zakładek dla roli "viewer" (kontrola na poziomie UI). Kolejność musi
-# odpowiadać liście st.tabs() powyżej.
-_TAB_ORDER = ["wind", "turbines", "layout", "compare", "benchmark", "optimize",
-              "group3", "aep", "econ", "3d", "report", "trash"]
-if not is_admin:
-    _hide_idx = [i + 1 for i, k in enumerate(_TAB_ORDER) if k not in VIEWER_TABS]
-    if _hide_idx:
-        _sel = ", ".join(
-            f'div[data-baseweb="tab-list"] button[data-baseweb="tab"]:nth-child({i})'
-            for i in _hide_idx
-        )
-        st.markdown(f"<style>{_sel} {{ display: none !important; }}</style>",
-                    unsafe_allow_html=True)
+# Ukrycie zakładek (kontrola na poziomie UI). Admin wybiera w panelu bocznym,
+# viewer ma stały zestaw podstawowych kart.
+if is_admin:
+    _visible = set(st.session_state.get("admin_visible_tabs", ALL_TAB_KEYS))
+else:
+    _visible = set(VIEWER_TABS)
+_hide_idx = [i + 1 for i, k in enumerate(ALL_TAB_KEYS) if k not in _visible]
+if _hide_idx:
+    _sel = ", ".join(
+        f'div[data-baseweb="tab-list"] button[data-baseweb="tab"]:nth-child({i})'
+        for i in _hide_idx
+    )
+    st.markdown(f"<style>{_sel} {{ display: none !important; }}</style>",
+                unsafe_allow_html=True)
 
 
 # =====================================================================
