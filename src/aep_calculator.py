@@ -312,6 +312,9 @@ class AEPCalculator:
         results = []
         orig_wake = self.farm.wake_model_name
         orig_turbine = self.farm.turbine_name
+        orig_layout_x = self.farm.layout_x.copy()
+        orig_layout_y = self.farm.layout_y.copy()
+        orig_layout_type = self.farm._layout_type
 
         for name, config in scenarios.items():
             # Zmień konfigurację
@@ -352,9 +355,15 @@ class AEPCalculator:
                 "total_capacity_mw": rated * self.farm.n_turbines,
             })
 
-        # Przywróć
+        # Przywróć oryginalną konfigurację — wake, turbinę ORAZ layout.
+        # switch_wake_model / switch_turbine wewnątrz wywołują _apply_current_layout,
+        # więc po nich dodatkowo wymuszamy oryginalne współrzędne, żeby nie zostać
+        # z layoutem ostatniego scenariusza.
         self.farm.switch_wake_model(orig_wake)
         self.farm.switch_turbine(orig_turbine)
+        self.farm.set_layout_custom(orig_layout_x, orig_layout_y, name=orig_layout_type)
+        if self.farm._wind_data is not None:
+            self.farm.fmodel.set(wind_data=self.farm._wind_data)
 
         return pd.DataFrame(results)
 

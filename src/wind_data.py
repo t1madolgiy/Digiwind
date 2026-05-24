@@ -82,6 +82,11 @@ class WindDataLoader:
         self.wind_speeds = wind_speeds
         self.wind_directions = wind_directions
         self.turbulence_intensities = turbulence_intensities
+        # Normalizuj timestamps do DatetimeIndex — niezależnie od źródła
+        # (mock zwraca DatetimeIndex, CSV/ERA5 zwracają Series). Bez tego
+        # `.month` / `.year` rzuca AttributeError na Series.
+        if timestamps is not None and not isinstance(timestamps, pd.DatetimeIndex):
+            timestamps = pd.DatetimeIndex(pd.to_datetime(timestamps))
         self.timestamps = timestamps
 
         # Walidacja — jeśli dane podane, muszą mieć tę samą długość
@@ -260,86 +265,54 @@ class WindDataLoader:
     # ------------------------------------------------------------------
     # 3. ERA5 LOADER — Copernicus Climate Data Store
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Pomocnicze — nazwa pliku cache per miesiąc + parsowanie wielu plików
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _era5_cache_filename(
+        year: int, month: int, latitude: float, longitude: float,
+    ) -> str:
+        """Standardowa nazwa pliku cache ERA5 dla danego miesiąca/lokalizacji."""
+        return f"era5_{year}-{month:02d}_{latitude}_{longitude}.nc"
+
     @classmethod
-    def from_era5(
+    def _combine_era5_files(
         cls,
-        latitude: float = 54.5,
-        longitude: float = 16.5,
-        years: list[int] = None,
-        hub_height: float = 150.0,
-        output_dir: Union[str, Path] = "data/raw",
+        files: list[Path],
+        hub_height: float,
     ) -> "WindDataLoader":
-        """Pobiera dane ERA5 z Copernicus CDS via cdsapi.
-
-        ERA5 dostarcza dane wiatrowe na 10m i 100m n.p.m.
-        Ekstrapolacja do hub_height za pomocą profilu logarytmicznego.
-
-        UWAGA: Wymaga skonfigurowanego ~/.cdsapirc z kluczem API.
+        """Czyta listę plików NetCDF ERA5 i scala je w jeden WindDataLoader.
 
         Args:
-            latitude: Szerokość geograficzna.
-            longitude: Długość geograficzna.
-            years: Lista lat do pobrania. Domyślnie [2015–2024].
+            files: Lista ścieżek do plików NetCDF.
             hub_height: Wysokość piasty do ekstrapolacji [m].
-            output_dir: Katalog na pobrane pliki.
 
         Returns:
-            WindDataLoader z danymi ERA5.
+            WindDataLoader posortowany po timestamp.
         """
-        try:
-            import cdsapi
-        except ImportError:
-            raise ImportError(
-                "Zainstaluj cdsapi: pip install cdsapi\n"
-                "Skonfiguruj klucz API: https://cds.climate.copernicus.eu/api-how-to"
+        if not files:
+            raise RuntimeError("Brak plików ERA5 do scalenia.")
+
+        all_data = []
+        failed = []
+        for f in files:
+            try:
+                all_data.append(cls._parse_era5_netcdf(f, hub_height))
+            except Exception as e:
+                failed.append((f.name, str(e)))
+                logger.warning(f"Nie udało się sparsować {f.name}: {e}")
+
+        if not all_data:
+            raise RuntimeError(
+                f"ERA5: żaden z {len(files)} plików nie został sparsowany. "
+                f"Pierwszy błąd: {failed[0] if failed else 'n/a'}"
             )
 
-        if years is None:
-            years = list(range(2015, 2025))
-
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        client = cdsapi.Client()
-        all_data = []
-
-        for year in years:
-            output_file = output_dir / f"era5_{year}_{latitude}_{longitude}.nc"
-
-            if output_file.exists():
-                logger.info(f"ERA5 {year} — plik istnieje, pomijam pobieranie.")
-            else:
-                logger.info(f"Pobieram ERA5 {year}...")
-                client.retrieve(
-                    "reanalysis-era5-single-levels",
-                    {
-                        "product_type": "reanalysis",
-                        "variable": [
-                            "100m_u_component_of_wind",
-                            "100m_v_component_of_wind",
-                            "10m_u_component_of_wind",
-                            "10m_v_component_of_wind",
-                        ],
-                        "year": str(year),
-                        "month": [f"{m:02d}" for m in range(1, 13)],
-                        "day": [f"{d:02d}" for d in range(1, 32)],
-                        "time": [f"{h:02d}:00" for h in range(24)],
-                        "area": [
-                            latitude + 0.1,
-                            longitude - 0.1,
-                            latitude - 0.1,
-                            longitude + 0.1,
-                        ],
-                        "format": "netcdf",
-                    },
-                    str(output_file),
-                )
-
-            # Parsowanie NetCDF
-            year_data = cls._parse_era5_netcdf(output_file, hub_height)
-            all_data.append(year_data)
+        if failed:
+            logger.warning(f"ERA5: pominięto {len(failed)} plików z błędami.")
 
         combined = pd.concat(all_data, ignore_index=True)
+        combined = combined.sort_values("timestamp").reset_index(drop=True)
 
         return cls(
             wind_speeds=combined["wind_speed"].values,
@@ -348,9 +321,257 @@ class WindDataLoader:
             timestamps=pd.to_datetime(combined["timestamp"]),
         )
 
+    @classmethod
+    def from_era5_local(
+        cls,
+        latitude: float = 54.5,
+        longitude: float = 16.5,
+        years: list[int] = None,
+        hub_height: float = 150.0,
+        cache_dir: Union[str, Path] = "data/raw",
+    ) -> "WindDataLoader":
+        """Czyta dane ERA5 z lokalnego cache — BEZ próby pobierania.
+
+        Używaj w aplikacjach (Streamlit), żeby nie blokować UI na pobieranie.
+        Pliki przygotuj wcześniej skryptem `scripts/download_era5.py`.
+
+        Args:
+            latitude: Szerokość geograficzna (musi się zgadzać z plikami w cache).
+            longitude: Długość geograficzna.
+            years: Lista lat. Domyślnie wszystkie znalezione w cache.
+            hub_height: Wysokość piasty [m] do ekstrapolacji logarytmicznej.
+            cache_dir: Katalog z plikami era5_YYYY-MM_lat_lon.nc.
+
+        Returns:
+            WindDataLoader z danymi z plików.
+
+        Raises:
+            FileNotFoundError: Gdy w cache brakuje plików dla podanej lokalizacji.
+        """
+        cache_dir = Path(cache_dir)
+        if not cache_dir.exists():
+            raise FileNotFoundError(
+                f"Cache ERA5 nie istnieje: {cache_dir}. "
+                f"Uruchom: python scripts/download_era5.py "
+                f"--lat {latitude} --lon {longitude}"
+            )
+
+        # Glob po wszystkich plikach pasujących do lokalizacji
+        pattern = f"era5_*_{latitude}_{longitude}.nc"
+        all_files = sorted(cache_dir.glob(pattern))
+
+        if years is not None:
+            years_set = {int(y) for y in years}
+            all_files = [
+                f for f in all_files
+                if any(f.name.startswith(f"era5_{y}-") for y in years_set)
+            ]
+
+        if not all_files:
+            raise FileNotFoundError(
+                f"Brak plików ERA5 w {cache_dir} dla "
+                f"lat={latitude}, lon={longitude}"
+                + (f", lata={sorted(years_set)}" if years else "")
+                + f".\nUruchom: python scripts/download_era5.py "
+                f"--lat {latitude} --lon {longitude}"
+                + (f" --years {' '.join(map(str, sorted(years_set)))}" if years else "")
+            )
+
+        logger.info(
+            f"ERA5 (local cache): {len(all_files)} plików z {cache_dir}"
+        )
+        return cls._combine_era5_files(all_files, hub_height)
+
+    @classmethod
+    def download_era5_months(
+        cls,
+        latitude: float = 54.5,
+        longitude: float = 16.5,
+        years: list[int] = None,
+        output_dir: Union[str, Path] = "data/raw",
+        max_retries: int = 3,
+        area_halfwidth: float = 0.1,
+        progress_callback=None,
+    ) -> tuple[list[Path], list[tuple]]:
+        """Pobiera dane ERA5 miesiąc po miesiącu — BEZ scalania w loader.
+
+        Używaj w skryptach offline (`scripts/download_era5.py`).
+        Bezpieczne do wielokrotnego uruchomienia: pomija już pobrane pliki.
+
+        Args:
+            latitude, longitude: Lokalizacja.
+            years: Lista lat. Domyślnie [2015–2024].
+            output_dir: Katalog docelowy.
+            max_retries: Liczba prób przy błędach przejściowych.
+            area_halfwidth: Połowa szerokości boxa wokół (lat, lon) [°].
+                Mniejszy box = mniejszy cost requesta.
+            progress_callback: Opcjonalna funkcja(done, total, label) do progress baru.
+
+        Returns:
+            (lista_pobranych_plików, lista_błędów[(year, month, err_msg)]).
+        """
+        try:
+            import cdsapi
+        except ImportError:
+            raise ImportError(
+                "Zainstaluj cdsapi: pip install cdsapi\n"
+                "Skonfiguruj klucz API: https://cds.climate.copernicus.eu/how-to-api"
+            )
+
+        if years is None:
+            years = list(range(2015, 2025))
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        import calendar as _calendar
+        import time as _time
+
+        client = cdsapi.Client()
+        downloaded_files: list[Path] = []
+        failed: list[tuple] = []
+        total = len(years) * 12
+        done = 0
+
+        for year in years:
+            for month in range(1, 13):
+                done += 1
+                out_file = output_dir / cls._era5_cache_filename(
+                    year, month, latitude, longitude,
+                )
+                label = f"ERA5 {year}-{month:02d}"
+
+                if out_file.exists() and out_file.stat().st_size > 0:
+                    logger.info(f"{label}: cache hit, pomijam.")
+                    downloaded_files.append(out_file)
+                    if progress_callback:
+                        progress_callback(done, total, f"{label} (cache)")
+                    continue
+
+                if progress_callback:
+                    progress_callback(done, total, f"{label} (pobieram...)")
+
+                n_days = _calendar.monthrange(year, month)[1]
+                request = {
+                    "product_type": "reanalysis",
+                    "variable": [
+                        "100m_u_component_of_wind",
+                        "100m_v_component_of_wind",
+                        "10m_u_component_of_wind",
+                        "10m_v_component_of_wind",
+                    ],
+                    "year": str(year),
+                    "month": f"{month:02d}",
+                    "day": [f"{d:02d}" for d in range(1, n_days + 1)],
+                    "time": [f"{h:02d}:00" for h in range(24)],
+                    "area": [
+                        latitude + area_halfwidth,
+                        longitude - area_halfwidth,
+                        latitude - area_halfwidth,
+                        longitude + area_halfwidth,
+                    ],
+                    "format": "netcdf",
+                    "download_format": "unarchived",
+                }
+
+                last_err = None
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        logger.info(
+                            f"{label}: pobieram (próba {attempt}/{max_retries})"
+                        )
+                        client.retrieve(
+                            "reanalysis-era5-single-levels",
+                            request,
+                            str(out_file),
+                        )
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        msg = str(e).lower()
+                        # cost limits / too large — retry nic nie da
+                        if "cost" in msg or "too large" in msg:
+                            logger.error(
+                                f"{label}: request za duży ({e}). "
+                                f"Zmniejsz area_halfwidth."
+                            )
+                            break
+                        logger.warning(
+                            f"{label} próba {attempt} nieudana: {e}"
+                        )
+                        if attempt < max_retries:
+                            _time.sleep(5 * attempt)
+
+                if last_err is not None:
+                    failed.append((year, month, str(last_err)))
+                    if out_file.exists() and out_file.stat().st_size == 0:
+                        out_file.unlink()
+                else:
+                    downloaded_files.append(out_file)
+
+        return downloaded_files, failed
+
+    @classmethod
+    def from_era5(
+        cls,
+        latitude: float = 54.5,
+        longitude: float = 16.5,
+        years: list[int] = None,
+        hub_height: float = 150.0,
+        output_dir: Union[str, Path] = "data/raw",
+        max_retries: int = 3,
+        area_halfwidth: float = 0.1,
+    ) -> "WindDataLoader":
+        """Pobiera dane ERA5 z Copernicus CDS i zwraca WindDataLoader.
+
+        Kombinacja `download_era5_months()` + `_combine_era5_files()`.
+        Do użycia w skryptach offline. W Streamlit używaj `from_era5_local()`
+        — nie blokuje UI i wymaga wcześniejszego pobrania danych skryptem
+        `scripts/download_era5.py`.
+
+        Args:
+            latitude, longitude: Lokalizacja.
+            years: Lista lat. Domyślnie [2015–2024].
+            hub_height: Wysokość piasty [m] do ekstrapolacji logarytmicznej.
+            output_dir: Katalog cache.
+            max_retries: Liczba prób przy błędach przejściowych.
+            area_halfwidth: Połowa szerokości boxa wokół (lat, lon) [°].
+
+        Returns:
+            WindDataLoader z danymi ERA5.
+        """
+        files, failed = cls.download_era5_months(
+            latitude=latitude,
+            longitude=longitude,
+            years=years,
+            output_dir=output_dir,
+            max_retries=max_retries,
+            area_halfwidth=area_halfwidth,
+        )
+
+        if not files:
+            raise RuntimeError(
+                "ERA5: nie udało się pobrać ani jednego miesiąca. "
+                f"Pierwszy błąd: {failed[0] if failed else 'n/a'}"
+            )
+
+        if failed:
+            logger.warning(
+                f"ERA5: pominięto {len(failed)} miesięcy z błędami. "
+                f"Przykład: {failed[0]}"
+            )
+
+        return cls._combine_era5_files(files, hub_height)
+
     @staticmethod
     def _parse_era5_netcdf(filepath: Path, hub_height: float) -> pd.DataFrame:
         """Parsuje plik NetCDF ERA5 i ekstrapoluje wiatr do hub_height.
+
+        Wspiera dwa formaty:
+            - Stary CDS API:        zmienna czasu = 'time'
+            - Nowy CDS Beta (2024+): zmienna czasu = 'valid_time',
+              dodatkowe wymiary 'number', 'expver' (ensemble member, archive ver.)
 
         Ekstrapolacja: profil logarytmiczny
             U(h) = U(h_ref) * ln(h / z0) / ln(h_ref / z0)
@@ -359,6 +580,24 @@ class WindDataLoader:
         import xarray as xr
 
         ds = xr.open_dataset(filepath)
+
+        # Nowy CDS Beta dodaje wymiary 'number' (ensemble) i 'expver' (wersja archiwum)
+        # — usuwamy je jeśli mają długość 1 (reanaliza deterministyczna).
+        for extra_dim in ("number", "expver"):
+            if extra_dim in ds.dims and ds.sizes[extra_dim] == 1:
+                ds = ds.squeeze(extra_dim, drop=True)
+
+        # Czas — różne nazwy w starym vs nowym formacie
+        time_var = None
+        for candidate in ("valid_time", "time"):
+            if candidate in ds.variables or candidate in ds.coords:
+                time_var = candidate
+                break
+        if time_var is None:
+            raise KeyError(
+                f"Brak zmiennej czasu w {filepath.name}. "
+                f"Dostępne: {list(ds.variables.keys())}"
+            )
 
         # Składowe wiatru na 100m
         u100 = ds["u100"].values.flatten()
@@ -384,15 +623,17 @@ class WindDataLoader:
         ti = np.clip(0.12 * shear, 0.02, 0.20)
 
         # Timestamps
-        timestamps = pd.to_datetime(ds["time"].values)
+        timestamps = pd.to_datetime(ds[time_var].values)
 
         ds.close()
 
+        # Wszystkie tablice MUSZĄ być tej samej długości — przytnij na wszelki wypadek
+        n = min(len(timestamps), len(ws_hub), len(wd_100), len(ti))
         return pd.DataFrame({
-            "timestamp": timestamps[:len(ws_hub)],
-            "wind_speed": ws_hub,
-            "wind_direction": wd_100,
-            "ti": ti,
+            "timestamp": timestamps[:n],
+            "wind_speed": ws_hub[:n],
+            "wind_direction": wd_100[:n],
+            "ti": ti[:n],
         })
 
     # ------------------------------------------------------------------
@@ -499,14 +740,22 @@ class WindDataLoader:
                 "weibull_k_est": self._estimate_weibull_k(),
                 "weibull_A_est": self._estimate_weibull_A(),
             },
-            "wind_direction": {
-                "dominant": float(self._dominant_direction()),
-                "mean_circular": float(self._circular_mean_direction()),
-            },
-            "turbulence_intensity": {
-                "mean": float(np.mean(self.turbulence_intensities)),
-                "std": float(np.std(self.turbulence_intensities)),
-            },
+            "wind_direction": (
+                {
+                    "dominant": float(self._dominant_direction()),
+                    "mean_circular": float(self._circular_mean_direction()),
+                }
+                if self.wind_directions is not None
+                else {"dominant": None, "mean_circular": None}
+            ),
+            "turbulence_intensity": (
+                {
+                    "mean": float(np.mean(self.turbulence_intensities)),
+                    "std": float(np.std(self.turbulence_intensities)),
+                }
+                if self.turbulence_intensities is not None
+                else {"mean": None, "std": None}
+            ),
         }
 
         if self.timestamps is not None:

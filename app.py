@@ -14,6 +14,7 @@ Uruchomienie:
     streamlit run app.py
 """
 
+import os
 import sys
 import logging
 import warnings
@@ -104,17 +105,51 @@ st.set_page_config(
 # =====================================================================
 # LOGOWANIE + ROLE (admin = wszystko, viewer = podstawowe zakładki)
 # =====================================================================
-# Konta: docelowo przenieś do .streamlit/secrets.toml. Tu domyślne dla wygody.
-# Format: login -> (hasło, rola). Rola "admin" widzi wszystko, "viewer" tylko basic.
-USERS = {
-    "admin": ("digiwind2025", "admin"),
-    "gość": ("gosc", "viewer"),
-}
-try:
-    if hasattr(st, "secrets") and "users" in st.secrets:
-        USERS = {u: (d["password"], d.get("role", "viewer")) for u, d in st.secrets["users"].items()}
-except Exception:
-    pass
+# Konta — kolejność źródeł (od najwyższego priorytetu):
+#   1. .streamlit/secrets.toml ([users])
+#   2. zmienne środowiskowe DIGIWIND_ADMIN_PASSWORD / DIGIWIND_VIEWER_PASSWORD
+#   3. losowe hasła wygenerowane przy starcie (wypisane w sidebarze)
+# Nigdy nie commituj prawdziwych haseł do repo.
+def _load_users() -> dict:
+    # 1) secrets.toml
+    try:
+        if hasattr(st, "secrets") and "users" in st.secrets:
+            return {
+                u: (d["password"], d.get("role", "viewer"))
+                for u, d in st.secrets["users"].items()
+            }
+    except Exception:
+        pass
+
+    # 2) zmienne środowiskowe
+    admin_pw = os.environ.get("DIGIWIND_ADMIN_PASSWORD")
+    viewer_pw = os.environ.get("DIGIWIND_VIEWER_PASSWORD")
+    if admin_pw or viewer_pw:
+        users = {}
+        if admin_pw:
+            users["admin"] = (admin_pw, "admin")
+        if viewer_pw:
+            users["gość"] = (viewer_pw, "viewer")
+        return users
+
+    # 3) fallback dev — losowe hasła per sesja Streamlit.
+    # WAŻNE: Streamlit przeładowuje skrypt na każdą interakcję, więc MUSIMY
+    # czytać z session_state (jeśli istnieje), inaczej generujemy nowe hasła
+    # przy każdym rerun i wyświetlone hasło przestaje pasować.
+    if "_dev_credentials" not in st.session_state:
+        import secrets as _secrets
+        st.session_state["_dev_credentials"] = {
+            "admin": _secrets.token_urlsafe(12),
+            "gość": _secrets.token_urlsafe(8),
+        }
+    creds = st.session_state["_dev_credentials"]
+    return {
+        "admin": (creds["admin"], "admin"),
+        "gość": (creds["gość"], "viewer"),
+    }
+
+
+USERS = _load_users()
 
 # Metadane zakładek (kolejność MUSI odpowiadać st.tabs() niżej).
 TAB_META = [
@@ -133,6 +168,16 @@ VIEWER_TABS = {"wind", "turbines", "layout", "aep"}
 if "auth_role" not in st.session_state:
     st.title("🌊 DigiWind — logowanie")
     st.caption("Zaloguj się, aby uzyskać dostęp do aplikacji.")
+    # Tryb dev (brak secrets.toml i brak env) — pokaż jednorazowe hasła,
+    # żeby było jasne czym się zalogować. Na produkcji tej gałęzi nie ma.
+    if "_dev_credentials" in st.session_state:
+        with st.expander("⚠️ Tryb deweloperski — losowe hasła per uruchomienie", expanded=True):
+            for _user, _pw in st.session_state["_dev_credentials"].items():
+                st.code(f"{_user} / {_pw}")
+            st.caption(
+                "Aby ustawić własne hasła: dodaj `[users]` w `.streamlit/secrets.toml` "
+                "lub ustaw zmienne `DIGIWIND_ADMIN_PASSWORD` / `DIGIWIND_VIEWER_PASSWORD`."
+            )
     with st.form("login_form"):
         _u = st.text_input("Login")
         _p = st.text_input("Hasło", type="password")
@@ -235,7 +280,9 @@ para_t1 = float(_cfg("para_t1", 88))
 para_t2 = float(_cfg("para_t2", 18))
 
 # --- Dane wiatrowe ---
-data_source = _cfg("cfg_datasource", "Mock (Weibull)")
+# Domyślnie ERA5 (lokalny cache) — realne dane są lepsze do raportów/analiz.
+# Mock zostaje jako opcja gdy cache pusty albo do szybkich testów.
+data_source = _cfg("cfg_datasource", "ERA5 (lokalny cache)")
 weibull_A = float(_cfg("cfg_wa", 9.5))
 weibull_k = float(_cfg("cfg_wk", 2.1))
 dominant_direction = int(_cfg("cfg_domdir", 240))
@@ -264,21 +311,63 @@ def generate_wind_data(weibull_A, weibull_k, n_years, dominant_direction=240.0, 
     return loader
 
 
-@st.cache_data(show_spinner="Pobieram ERA5 (może chwilę potrwać przy pierwszym uruchomieniu)...")
+def scan_era5_cache(cache_dir: str = "data/raw") -> dict:
+    """Skanuje katalog z plikami ERA5 i zwraca dostępne lokalizacje + lata.
+
+    Format pliku: era5_YYYY-MM_lat_lon.nc
+    Zwraca: {(lat, lon): {"years": sorted_list, "n_files": int, "size_mb": float}}
+    """
+    cache_path = Path(cache_dir)
+    if not cache_path.exists():
+        return {}
+
+    locations: dict = {}
+    for f in cache_path.glob("era5_*.nc"):
+        parts = f.stem.split("_")  # ['era5', 'YYYY-MM', 'lat', 'lon']
+        if len(parts) < 4:
+            continue
+        try:
+            year = int(parts[1].split("-")[0])
+            lat = float(parts[2])
+            lon = float(parts[3])
+        except (ValueError, IndexError):
+            continue
+        key = (lat, lon)
+        entry = locations.setdefault(
+            key, {"years": set(), "n_files": 0, "size_mb": 0.0},
+        )
+        entry["years"].add(year)
+        entry["n_files"] += 1
+        entry["size_mb"] += f.stat().st_size / 1024 / 1024
+
+    # Zamień sety na sorted listy
+    for entry in locations.values():
+        entry["years"] = sorted(entry["years"])
+    return locations
+
+
+@st.cache_data(show_spinner="Wczytuję ERA5 z lokalnego cache...")
 def load_era5_wind(lat, lon, years_tuple, hub_height):
-    """Próbuje pobrać dane ERA5. Zwraca (loader, error_msg). Loader=None przy błędzie."""
+    """Wczytuje ERA5 z lokalnego cache (data/raw/). Bez pobierania z sieci.
+
+    Zwraca (loader, error_msg). Loader=None przy błędzie.
+    Aby dodać dane do cache: `python scripts/download_era5.py`.
+    """
     try:
-        loader = WindDataLoader.from_era5(
+        loader = WindDataLoader.from_era5_local(
             latitude=float(lat),
             longitude=float(lon),
             years=list(years_tuple),
             hub_height=float(hub_height),
+            cache_dir="data/raw",
         )
         return loader, None
+    except FileNotFoundError as e:
+        return None, f"Brak danych w cache:\n{e}"
     except ImportError as e:
         return None, (
-            f"Brak bibliotek do ERA5 ({e}). "
-            "Zainstaluj: `pip install cdsapi xarray netcdf4`"
+            f"Brak bibliotek do parsowania ERA5 ({e}). "
+            "Zainstaluj: `pip install xarray netcdf4`"
         )
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
@@ -287,20 +376,29 @@ def load_era5_wind(lat, lon, years_tuple, hub_height):
 era5_active = False
 era5_error = None
 
+
+def _mock_fallback(reason: str):
+    """Fallback do mock z ostrzeżeniem w sidebarze."""
+    st.sidebar.warning(f"⚠️ {reason} Fallback: mock (Weibull).")
+    return generate_wind_data(
+        weibull_A, weibull_k, n_years, dominant_direction, direction_spread,
+    )
+
+
 if data_source == "Mock (Weibull)":
-    loader = generate_wind_data(weibull_A, weibull_k, n_years, dominant_direction, direction_spread)
+    loader = generate_wind_data(
+        weibull_A, weibull_k, n_years, dominant_direction, direction_spread,
+    )
 elif not era5_years:
-    st.sidebar.warning("⚠️ Wybierz co najmniej jeden rok ERA5. Używam mock.")
-    loader = generate_wind_data(weibull_A, weibull_k, n_years, dominant_direction, direction_spread)
+    loader = _mock_fallback("Nie wybrano żadnego roku ERA5.")
 else:
     loader, era5_error = load_era5_wind(era5_lat, era5_lon, era5_years, era5_hub_input)
     if loader is None:
-        st.sidebar.error(f"❌ ERA5: {era5_error}\n\nUżywam mock data.")
-        loader = generate_wind_data(weibull_A, weibull_k, n_years, dominant_direction, direction_spread)
+        loader = _mock_fallback(f"ERA5: {era5_error}")
     else:
         era5_active = True
         st.sidebar.success(
-            f"✅ ERA5: {len(era5_years)} lat, "
+            f"✅ ERA5 (lokalny cache): {len(era5_years)} lat, "
             f"{len(loader.wind_speeds)} rekordów, "
             f"@{era5_hub_input:.0f}m"
         )
@@ -420,9 +518,29 @@ _sb5.metric("Capacity Factor", f"{cf:.1f}%")
 st.caption(
     f"⚙️ Model wake: **{wake_model.upper()}** · "
     f"🌬️ Wiatr obliczeniowy: **{eval_desc}** · "
-    f"📊 Dane: **{'ERA5' if era5_active else 'Mock (Weibull)'}**"
-    + ("  — ⚠️ wąski bin: AEP to wskaźnik 1 warunku, nie roczny" if eval_is_narrow else "")
+    f"📊 Źródło: **{'ERA5' if era5_active else 'Mock (Weibull)'}**"
 )
+
+# Ostrzeżenie na każdej zakładce — jeśli używamy 'wąskiego bina' to wszystkie
+# obliczenia (AEP, optymalizacja, benchmark itp.) liczą się na JEDNYM punkcie,
+# nie na pełnej róży ERA5. Łatwo o tym zapomnieć — banner przypomina.
+if eval_is_narrow:
+    _warn_col1, _warn_col2 = st.columns([5, 1])
+    with _warn_col1:
+        st.warning(
+            f"⚠️ **Tryb obliczeniowy: Wąski bin** "
+            f"(WD={eval_wd:.0f}° · WS={eval_ws:.1f} m/s · TI={eval_ti:.2f}) — "
+            f"wszystkie wyniki (AEP, optymalizacja, benchmark, ekonomia) liczą się "
+            f"na **1 punkcie pracy**, NIE na pełnej róży "
+            f"{'ERA5' if era5_active else 'mock'}. AEP to wskaźnik 1 warunku, "
+            f"nie roczny. **Do raportów przełącz na 'Pełną różę'** (zakładka 🌬️ Wiatr → dół)."
+        )
+    with _warn_col2:
+        if st.button("⚡ Przełącz na pełną różę", key="_quick_switch_rose",
+                     help="Skrót — przełącza globalny tryb obliczeniowy na pełną różę wiatrów"):
+            st.session_state["cfg_evalmode"] = "Pełna róża wiatrów"
+            st.rerun()
+
 st.divider()
 
 
@@ -465,12 +583,18 @@ with tab_wind:
     st.header("🌬️ Dane wiatrowe")
     st.caption("Źródło i parametry wiatru. Wybór obowiązuje we wszystkich zakładkach.")
     st.radio(
-        "Źródło danych", ["Mock (Weibull)", "ERA5 (Copernicus)"],
+        "Źródło danych", ["Mock (Weibull)", "ERA5 (lokalny cache)"],
         horizontal=True, key="cfg_datasource",
-        help="ERA5 wymaga cdsapi+xarray+netcdf4 i klucza w ~/.cdsapirc. "
-             "Dla ERA5 nie zmieniasz parametrów Weibulla — dane są realne.",
+        help=(
+            "**Mock**: syntetyczny rozkład Weibulla — szybko, do testów.\n\n"
+            "**ERA5**: realne dane reanalizy z Copernicus. Aplikacja nie "
+            "pobiera ich sama (zbyt wolne dla UI). Najpierw uruchom:\n\n"
+            "```\npython scripts/download_era5.py --lat 54.5 --lon 16.5 "
+            "--years 2023\n```\n\n"
+            "Wymaga `cdsapi` + klucza w `~/.cdsapirc`."
+        ),
     )
-    if st.session_state.get("cfg_datasource", "Mock (Weibull)") == "Mock (Weibull)":
+    if st.session_state.get("cfg_datasource", "ERA5 (lokalny cache)") == "Mock (Weibull)":
         cwa, cwk = st.columns(2)
         cwa.slider("Weibull A [m/s]", 6.0, 14.0, 9.5, 0.5, key="cfg_wa")
         cwk.slider("Weibull k", 1.5, 3.0, 2.1, 0.1, key="cfg_wk")
@@ -485,20 +609,109 @@ with tab_wind:
         )
         st.selectbox("Lata danych", [1, 2, 3], index=0, key="cfg_nyears")
     else:
-        st.caption(
-            "Pobranie z Copernicus CDS. Pierwsze ściągnięcie trwa kilka minut, "
-            "kolejne są z lokalnego cache w `data/raw/`."
-        )
-        cla, clo = st.columns(2)
-        cla.number_input("Szerokość [°N]", 50.0, 60.0, 54.5, 0.1, key="cfg_era5lat")
-        clo.number_input("Długość [°E]", 10.0, 20.0, 16.5, 0.1, key="cfg_era5lon")
-        st.multiselect("Lata", list(range(2015, 2025)), default=[2023], key="cfg_era5years")
-        st.slider("Hub height [m]", 80, 200, 150, 10, key="cfg_era5hub")
+        # ---- ERA5 — automatyczne wykrywanie z lokalnego cache ----
+        _cache = scan_era5_cache("data/raw")
+
+        if not _cache:
+            # Brak żadnych danych — pokaż komendę do pobrania
+            st.warning(
+                "📭 **Brak danych ERA5 w `data/raw/`.**\n\n"
+                "Pobierz dane skryptem (zmień rok jeśli chcesz):"
+            )
+            st.code(
+                "python scripts/download_era5.py --lat 54.5 --lon 16.5 --years 2023",
+                language="bash",
+            )
+            st.caption(
+                "💡 Wskazówka: można pobrać kilka lat naraz, np. "
+                "`--years 2019 2020 2021 2022 2023`. Pobieranie trwa "
+                "~15 min na rok (zależnie od kolejki Copernicus)."
+            )
+            # Placeholder żeby app.py się nie wywalił niżej
+            st.session_state.setdefault("cfg_era5lat", 54.5)
+            st.session_state.setdefault("cfg_era5lon", 16.5)
+            st.session_state.setdefault("cfg_era5years", ())
+        else:
+            # Mamy cache — wybierz lokalizację (jeśli kilka)
+            locations = sorted(_cache.keys())
+            if len(locations) == 1:
+                lat, lon = locations[0]
+                st.session_state["cfg_era5lat"] = lat
+                st.session_state["cfg_era5lon"] = lon
+                entry = _cache[(lat, lon)]
+                st.success(
+                    f"🛰️ **ERA5 dla {lat}°N, {lon}°E** | "
+                    f"{entry['n_files']} plików • {entry['size_mb']:.1f} MB • "
+                    f"lata: {', '.join(map(str, entry['years']))}"
+                )
+            else:
+                # Kilka lokalizacji — pozwól wybrać
+                loc_labels = [f"{lat}°N, {lon}°E ({len(_cache[(lat,lon)]['years'])} lat)"
+                              for lat, lon in locations]
+                idx = st.selectbox(
+                    "Lokalizacja (z cache)",
+                    range(len(locations)),
+                    format_func=lambda i: loc_labels[i],
+                    key="cfg_era5_loc_idx",
+                )
+                lat, lon = locations[idx]
+                st.session_state["cfg_era5lat"] = lat
+                st.session_state["cfg_era5lon"] = lon
+                entry = _cache[(lat, lon)]
+                st.caption(
+                    f"📦 {entry['n_files']} plików • {entry['size_mb']:.1f} MB"
+                )
+
+            # Wybór lat — TYLKO te dostępne w cache dla tej lokalizacji
+            available_years = entry["years"]
+            # Wyczyść poprzedni wybór jeśli zawiera lata których już nie ma
+            prev_selection = list(st.session_state.get("cfg_era5years", ()))
+            valid_prev = [y for y in prev_selection if y in available_years]
+            default_years = valid_prev if valid_prev else available_years
+
+            st.multiselect(
+                "Lata (tylko z pobranych)",
+                options=available_years,
+                default=default_years,
+                key="cfg_era5years",
+                help="Możesz wybrać dowolny podzbiór lat dostępnych w cache.",
+            )
+            st.slider(
+                "Hub height [m]",
+                80, 200, 150, 10, key="cfg_era5hub",
+                help="Wysokość piasty turbiny do ekstrapolacji wiatru z 100m.",
+            )
+
+            # Komenda do pobrania DODATKOWYCH lat — zawsze widoczna
+            with st.expander("➕ Pobierz dodatkowe lata", expanded=False):
+                st.caption(
+                    "Zmień rok i uruchom w terminalu w katalogu projektu. "
+                    "Skrypt pomija już pobrane miesiące."
+                )
+                st.code(
+                    f"python scripts/download_era5.py --lat {lat} --lon {lon} --years 2024",
+                    language="bash",
+                )
+                st.caption(
+                    "Można podać kilka lat: `--years 2014 2015 2016 ... 2023`. "
+                    "Po pobraniu odśwież stronę (R)."
+                )
     st.selectbox(
         "Rozdzielczość WindRose",
         ["Gruby (30°)", "Dokładny (10°)", "Precyzyjny (5°)"],
         index=1, key="cfg_wrres",
-        help="Wpływa na binning AEP w FLORIS oraz liczbę słupków na róży poniżej.",
+        help=(
+            "Określa jak gęsto dyskretyzujemy różę wiatrów — pojedynczy 'bin' to "
+            "para (kierunek, prędkość) z przypisaną częstotliwością.\n\n"
+            "**Gruby (30°)** — 12 sektorów kierunku × 8 binów prędkości = ~96 binów. "
+            "AEP liczy się ~3× szybciej, ale traci niuanse rozkładu. Do szybkich "
+            "porównań i optymalizacji layoutu.\n\n"
+            "**Dokładny (10°)** — 36 sektorów × 12 binów ≈ 432 biny. Standard "
+            "branżowy do raportów AEP. Dobre rozeznanie kierunków SW vs W vs NW.\n\n"
+            "**Precyzyjny (5°)** — 72 sektory × ~22 binów ≈ 1600 binów. AEP liczy "
+            "się ~5× wolniej niż 'Dokładny'. Sensowne tylko dla finalnej analizy "
+            "ekonomicznej, gdy każdy 0.1% AEP się liczy."
+        ),
     )
 
     st.divider()
@@ -704,22 +917,214 @@ with tab_wind:
         fig = loader.plot_wind_rose(title=rose_title, n_sectors=n_sectors_plot)
         st.pyplot(fig)
         plt.close()
+        st.caption(
+            "🌹 **Róża wiatrów** — najważniejszy wykres analizy wiatru. Pokazuje "
+            "**z jakich kierunków** (sektory koła) i **z jakimi prędkościami** "
+            "(kolory) wieje wiatr, oraz **jak często** (długość słupka = % czasu). "
+            "Decyduje o optymalnej orientacji rzędów turbin — chcemy ustawić je "
+            "PROSTOPADLE do dominującego kierunku, żeby minimalizować wake losses."
+        )
     with col_stats:
         stats = loader.summary()
-        st.subheader("Statystyki")
+        st.subheader("📋 Statystyki kluczowe")
+        # Defensive — TI / kierunek mogą być None gdy dane niekompletne
+        _ti_mean = stats.get("turbulence_intensity", {}).get("mean")
+        _dir_dom = stats.get("wind_direction", {}).get("dominant")
         for k, v in [
             ("Rekordów", stats['n_records']),
             ("Prędkość średnia", f"{stats['wind_speed']['mean']:.1f} m/s"),
-            ("Weibull k", f"{stats['wind_speed']['weibull_k_est']:.2f}"),
-            ("Weibull A", f"{stats['wind_speed']['weibull_A_est']:.1f} m/s"),
-            ("Kierunek dominujący", f"{stats['wind_direction']['dominant']:.0f}°"),
-            ("TI średnia", f"{stats['turbulence_intensity']['mean']:.4f}"),
+            ("Mediana", f"{stats['wind_speed']['median']:.1f} m/s"),
+            ("Max", f"{stats['wind_speed']['max']:.1f} m/s"),
+            ("Weibull k (kształt)", f"{stats['wind_speed']['weibull_k_est']:.2f}"),
+            ("Weibull A (skala)", f"{stats['wind_speed']['weibull_A_est']:.1f} m/s"),
+            ("Kierunek dominujący", f"{_dir_dom:.0f}°" if _dir_dom is not None else "—"),
+            ("TI średnia", f"{_ti_mean:.4f}" if _ti_mean is not None else "—"),
         ]:
             st.write(f"**{k}:** {v}")
+        with st.expander("ℹ️ Co znaczą te liczby?"):
+            st.markdown(
+                "- **Weibull k** — kształt rozkładu prędkości. "
+                "k≈1.5 = bardzo zmienny wiatr (kontynent), k≈2.0–2.5 = stabilny "
+                "wiatr (morze, lokalizacje offshore).\n"
+                "- **Weibull A** — średnia ważona prędkość. Im wyższe, tym "
+                "więcej energii. Bałtyk Pd. typowo ma A≈9–10 m/s na 150 m.\n"
+                "- **TI (turbulence intensity)** — względna zmienność prędkości. "
+                "Offshore: 0.04–0.08, onshore: 0.10–0.20. Wyższe TI = większe "
+                "wake recovery, ale szybsze zużycie turbin."
+            )
 
     fig = loader.plot_time_series()
     st.pyplot(fig)
     plt.close()
+    st.caption(
+        "📈 **Cztery panele serii czasowej** (zgodne z standardem analizy zasobów wiatru):\n"
+        "- *Lewy górny* — prędkość wiatru godzina po godzinie + średnia 24h (pomarańczowa). "
+        "Widać zimy/lata, sztormy, okresy ciszy.\n"
+        "- *Prawy górny* — kierunek wiatru, każdy punkt to jedna godzina. Skupiska "
+        "pokazują dominujące kierunki.\n"
+        "- *Lewy dolny* — histogram prędkości + dopasowany rozkład Weibulla (krzywa "
+        "pomarańczowa). Jeśli histogram dobrze pasuje do krzywej, rozkład Weibulla "
+        "jest poprawnym modelem dla tej lokalizacji.\n"
+        "- *Prawy dolny* — turbulencja w funkcji prędkości. Normalnie TI MALEJE "
+        "z prędkością (silny wiatr 'gładzi' atmosferę)."
+    )
+
+    # ---------- Dodatkowe wykresy analityczne ----------
+    st.divider()
+    st.subheader("🔬 Dodatkowe analizy wiatru")
+
+    # 1. Histogram kierunków (osobno od róży — pokazuje gołe liczby)
+    # 2. Krzywa przekraczania prędkości (exceedance curve) — kluczowe dla wind energy
+    # 3. Średnia prędkość per miesiąc (sezonowość)
+    # 4. Histogram TI (rozkład turbulencji)
+    fig_extra, axes_extra = plt.subplots(2, 2, figsize=(14, 9))
+
+    # ============ Panel 1: Histogram kierunków ============
+    ax = axes_extra[0, 0]
+    bins = np.arange(0, 361, 10)
+    counts, _ = np.histogram(loader.wind_directions, bins=bins)
+    freq_pct = counts / counts.sum() * 100
+    centers = (bins[:-1] + bins[1:]) / 2
+    bars = ax.bar(centers, freq_pct, width=9, color="#1e5c3a",
+                  edgecolor="white", linewidth=0.4, alpha=0.85)
+    # Podświetl top-3 kierunki
+    top3 = np.argsort(freq_pct)[-3:]
+    for idx in top3:
+        bars[idx].set_color("#c8531a")
+    ax.set_xlim(0, 360)
+    ax.set_xticks([0, 90, 180, 270, 360])
+    ax.set_xticklabels(["N (0°)", "E (90°)", "S (180°)", "W (270°)", "N (360°)"])
+    ax.set_ylabel("Częstotliwość [%]")
+    ax.set_title("Histogram kierunków wiatru (binowanie co 10°)")
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # ============ Panel 2: Krzywa przekroczenia prędkości (exceedance) ============
+    ax = axes_extra[0, 1]
+    sorted_ws = np.sort(loader.wind_speeds)[::-1]
+    exceedance_pct = np.arange(1, len(sorted_ws) + 1) / len(sorted_ws) * 100
+    ax.plot(sorted_ws, exceedance_pct, color="#534AB7", linewidth=2)
+    # Linie pomocnicze dla cut-in/rated/cut-out
+    for v, lbl, color in [(3, "cut-in", "#999"), (11, "rated~", "#4CAF50"), (25, "cut-out", "#c8531a")]:
+        ax.axvline(v, color=color, linestyle="--", alpha=0.6, linewidth=1)
+        ax.text(v, 95, f" {lbl}", color=color, fontsize=8, va="top")
+    ax.set_xlabel("Prędkość wiatru [m/s]")
+    ax.set_ylabel("% czasu z prędkością ≥ X")
+    ax.set_title("Krzywa przekroczenia prędkości (Exceedance)")
+    ax.set_xlim(0, max(25, sorted_ws.max() + 1))
+    ax.set_ylim(0, 100)
+    ax.grid(True, alpha=0.3)
+
+    # ============ Panel 3: Średnia prędkość per miesiąc (sezonowość) ============
+    ax = axes_extra[1, 0]
+    if loader.timestamps is not None:
+        # WindDataLoader.__init__ normalizuje do DatetimeIndex, więc .month działa zawsze
+        months = np.asarray(loader.timestamps.month)
+        monthly_means = [loader.wind_speeds[months == m].mean() for m in range(1, 13)]
+        monthly_stds = [loader.wind_speeds[months == m].std() for m in range(1, 13)]
+        month_names = ["Sty", "Lut", "Mar", "Kwi", "Maj", "Cze",
+                       "Lip", "Sie", "Wrz", "Paź", "Lis", "Gru"]
+        ax.bar(month_names, monthly_means, yerr=monthly_stds,
+               color="#1e5c3a", alpha=0.8, edgecolor="white",
+               capsize=4, error_kw={"alpha": 0.5})
+        overall_mean = loader.wind_speeds.mean()
+        ax.axhline(overall_mean, color="#c8531a", linestyle="--",
+                   linewidth=1.5, label=f"Średnia roczna: {overall_mean:.1f} m/s")
+        ax.set_ylabel("Prędkość średnia [m/s]")
+        ax.set_title("Sezonowość — średnia prędkość per miesiąc (±σ)")
+        ax.legend(fontsize=9, loc="lower center")
+        ax.grid(True, alpha=0.3, axis="y")
+    else:
+        ax.text(0.5, 0.5, "Brak timestampów\n(potrzebne do analizy sezonowej)",
+                ha="center", va="center", transform=ax.transAxes, color="#888")
+        ax.set_title("Sezonowość")
+
+    # ============ Panel 4: Histogram TI ============
+    ax = axes_extra[1, 1]
+    if loader.turbulence_intensities is not None:
+        ax.hist(loader.turbulence_intensities, bins=40, color="#534AB7",
+                alpha=0.7, edgecolor="white", linewidth=0.4)
+        mean_ti = loader.turbulence_intensities.mean()
+        ax.axvline(mean_ti, color="#c8531a", linestyle="--",
+                   linewidth=2, label=f"Średnia: {mean_ti:.3f}")
+        # Zakresy referencyjne IEC
+        ax.axvspan(0.04, 0.08, alpha=0.10, color="green", label="Typowo offshore (0.04–0.08)")
+        ax.axvspan(0.10, 0.20, alpha=0.10, color="orange", label="Typowo onshore (0.10–0.20)")
+        ax.set_xlabel("Turbulence Intensity [-]")
+        ax.set_ylabel("Liczba godzin")
+        ax.set_title("Rozkład intensywności turbulencji")
+        ax.legend(fontsize=8, loc="upper right")
+        ax.grid(True, alpha=0.3, axis="y")
+    else:
+        ax.text(0.5, 0.5, "Brak danych TI", ha="center", va="center",
+                transform=ax.transAxes, color="#888")
+
+    fig_extra.tight_layout()
+    st.pyplot(fig_extra)
+    plt.close(fig_extra)
+
+    # Opisy wszystkich 4 dodatkowych wykresów w expanderach
+    c1, c2 = st.columns(2)
+    with c1:
+        with st.expander("📊 Histogram kierunków — co to mówi?"):
+            st.markdown(
+                "Pokazuje **% godzin w roku** kiedy wiatr wiał z danego sektora "
+                "(bin co 10°). To samo co róża wiatrów, ale w postaci słupkowej — "
+                "łatwiej porównać sąsiednie kierunki.\n\n"
+                "**Top-3 kierunki** są podświetlone na pomarańczowo. Dla Bałtyku "
+                "Pd. typowo wieje z SW–W (210°–290°). To główny powód czemu "
+                "farmy na polskim morzu mają rzędy biegnące **NW–SE** "
+                "(prostopadle do dominujących kierunków).\n\n"
+                "**Dlaczego nie tylko róża?** Róża miesza prędkość i kierunek. "
+                "Histogram pokazuje gołą częstotliwość kierunków — szybciej "
+                "widać 'gdzie wieje', bez rozproszenia uwagi przez kolory."
+            )
+        with st.expander("📈 Sezonowość — co to mówi?"):
+            st.markdown(
+                "Średnia prędkość wiatru **per miesiąc** + odchylenie standardowe "
+                "(czarne wąsy). Pomarańczowa linia = średnia roczna.\n\n"
+                "**Wzorzec dla Polski / Bałtyku Pd.:**\n"
+                "- Najwięcej wiatru: **listopad–luty** (~10–11 m/s) — sezon "
+                "sztormowy, dominują niże nad N Atlantykiem\n"
+                "- Najmniej: **lipiec–sierpień** (~7–8 m/s) — stabilny układ "
+                "wyżów\n\n"
+                "**Wpływ na biznes:** ferma offshore na Bałtyku Pd. produkuje "
+                "**~60% rocznego AEP w 6 miesiącach zimowych**. Operator musi "
+                "to uwzględnić w planowaniu serwisów (lato = tańszy serwis, "
+                "mniej traconej produkcji)."
+            )
+    with c2:
+        with st.expander("📉 Krzywa przekroczenia — co to mówi?"):
+            st.markdown(
+                "**Eksceptionalnie ważny wykres** dla energetyki wiatrowej. "
+                "Czyta się tak: *'przez X% czasu w roku prędkość wiatru była "
+                "≥ Y m/s'*.\n\n"
+                "**Linie referencyjne (typowa IEA 15 MW):**\n"
+                "- **cut-in (3 m/s)** — poniżej tej prędkości turbina stoi. "
+                "Im niżej krzywa przecina tę linię = tym mniej godzin "
+                "produktywnych.\n"
+                "- **rated (~11 m/s)** — powyżej tej prędkości turbina daje "
+                "moc znamionową. Im więcej czasu wieje ≥ rated = tym lepiej "
+                "(prosta moc, niezależnie od prędkości).\n"
+                "- **cut-out (25 m/s)** — wyłączenie awaryjne. Dobre miejsce "
+                "ma BARDZO mało czasu powyżej tej linii (sztormy).\n\n"
+                "**Praktyka:** dobre lokalizacje offshore mają **~50% czasu "
+                "wiatr ≥ 8 m/s** — to oznacza wysoki capacity factor (40-55%)."
+            )
+        with st.expander("🌪️ Rozkład TI — co to mówi?"):
+            st.markdown(
+                "**Turbulence Intensity (TI)** = σ(prędkości) / średnia prędkość "
+                "w krótkim oknie. Im wyższe, tym bardziej 'porywisty' wiatr.\n\n"
+                "**Zielony pas (0.04–0.08)** = typowe TI offshore. Mała "
+                "chropowatość morza → gładki wiatr → wolne 'mieszanie się' "
+                "śladów wake → **wake losses są bardziej dotkliwe** (turbiny "
+                "downstream cierpią dłużej).\n\n"
+                "**Pomarańczowy pas (0.10–0.20)** = typowe TI onshore. "
+                "Wzgórza, las, budynki → wiatr szybko się 'odnawia' → krótsze "
+                "wake → mniejsze straty.\n\n"
+                "**Konsekwencja:** dla farmy offshore (niska TI) potrzeba "
+                "**WIĘKSZEGO rozstawu turbin** niż onshore (typowo 7–10×D "
+                "vs 5–7×D), żeby wake zdążył się rozmyć."
+            )
 
 
 # =====================================================================

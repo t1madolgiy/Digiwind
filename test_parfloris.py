@@ -1,10 +1,17 @@
 """Test ParFlorisModel — porównanie czasu vs FlorisModel."""
 import time
+from pathlib import Path
+
 import numpy as np
+import floris
 from floris import FlorisModel, ParFlorisModel, WindRose
 
+# Domyślny config FLORIS — używamy go zamiast nieistniejącego "inputs/gch.yaml",
+# żeby test działał out-of-the-box bez dodatkowych plików.
+DEFAULT_YAML = str(Path(floris.__file__).parent / "default_inputs.yaml")
+
 # Setup
-fmodel = FlorisModel("inputs/gch.yaml")  # albo inny config
+fmodel = FlorisModel(DEFAULT_YAML)
 n_rows, n_cols = 5, 5
 D = 240  # IEA 15MW
 sp = 7 * D
@@ -28,7 +35,7 @@ print(f"FlorisModel:    {t_seq:.2f}s, AEP={aep_seq/1e9:.2f} GWh")
 
 # --- Test 2: ParFlorisModel ---
 try:
-    pfmodel = ParFlorisModel("inputs/gch.yaml", max_workers=8)
+    pfmodel = ParFlorisModel(DEFAULT_YAML, max_workers=8)
     pfmodel.set(layout_x=layout_x, layout_y=layout_y, wind_data=wr)
     t0 = time.perf_counter()
     pfmodel.run()

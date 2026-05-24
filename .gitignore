@@ -13,3 +13,6 @@ outputs/figures/*.png
 outputs/exports/*.csv
 .DS_Store
 *.log
+
+# Streamlit local secrets (passwords, API keys)
+.streamlit/secrets.toml
