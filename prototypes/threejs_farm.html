@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DigiWind — prototyp 3D (three.js)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: system-ui, sans-serif; background:#0b1f2a; }
+  #info {
+    position: absolute; top: 12px; left: 12px; color: #eaf2f8;
+    background: rgba(10,30,45,0.6); padding: 10px 14px; border-radius: 8px;
+    font-size: 13px; line-height: 1.5; max-width: 320px; z-index: 10;
+  }
+  #info b { color: #7fd1ff; }
+  .ctl { margin-top: 6px; }
+  label { font-size:12px; color:#bcd; }
+  input[type=range]{ width:140px; vertical-align:middle; }
+</style>
+</head>
+<body>
+<div id="info">
+  <b>DigiWind — prototyp 3D (three.js)</b><br/>
+  Myszka: obróć · scroll: zoom · prawy: przesuń<br/>
+  <div class="ctl"><label>Prędkość obrotu łopat <input id="spin" type="range" min="0" max="3" step="0.1" value="1"></label></div>
+  <div class="ctl"><label>Pokaż ślady <input id="wakes" type="checkbox" checked></label></div>
+  <div class="ctl">To <b>statyczne demo wizualne</b> — pokazuje, jak mogłoby wyglądać prawdziwe 3D w apce (nie liczy FLORIS).</div>
+</div>
+
+<!-- three.js r128 (globalny build + OrbitControls) z CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9ec7e0);
+scene.fog = new THREE.Fog(0x9ec7e0, 80, 260);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 2000);
+camera.position.set(60, 45, 70);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 5, 0);
+controls.enableDamping = true;
+
+// Światło
+scene.add(new THREE.HemisphereLight(0xffffff, 0x335577, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+sun.position.set(50, 80, 30); sun.castShadow = true;
+scene.add(sun);
+
+// Morze — płaszczyzna z lekkim falowaniem
+const seaGeo = new THREE.PlaneGeometry(400, 400, 80, 80);
+const seaMat = new THREE.MeshPhongMaterial({ color: 0x1a6fa3, transparent: true, opacity: 0.92, shininess: 80 });
+const sea = new THREE.Mesh(seaGeo, seaMat);
+sea.rotation.x = -Math.PI/2;
+sea.receiveShadow = true;
+scene.add(sea);
+const seaPos = seaGeo.attributes.position;
+const seaBase = seaPos.array.slice();
+
+// Parametry farmy (jednostki umowne; D=2)
+const D = 2.0, R = D*1.5, HUB = 8, SPACING = 9, N = 5;
+const blades = [];   // do animacji
+const wakeMeshes = [];
+
+function makeTurbine(px, pz) {
+  const g = new THREE.Group();
+  // Wieża (lekko zwężana)
+  const tower = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.18, 0.32, HUB, 16),
+    new THREE.MeshPhongMaterial({ color: 0xf0f3f6 })
+  );
+  tower.position.y = HUB/2; tower.castShadow = true;
+  g.add(tower);
+  // Gondola
+  const nac = new THREE.Mesh(
+    new THREE.BoxGeometry(1.4, 0.7, 0.7),
+    new THREE.MeshPhongMaterial({ color: 0xe8ebee })
+  );
+  nac.position.set(0.2, HUB, 0); nac.castShadow = true;
+  g.add(nac);
+  // Wirnik: hub + 3 łopaty, obraca się wokół osi X (oś wiatru)
+  const rotor = new THREE.Group();
+  rotor.position.set(-0.4, HUB, 0);
+  const hub = new THREE.Mesh(new THREE.SphereGeometry(0.35, 16, 16),
+    new THREE.MeshPhongMaterial({ color: 0xdfe6ea }));
+  rotor.add(hub);
+  for (let k = 0; k < 3; k++) {
+    const blade = new THREE.Mesh(
+      new THREE.BoxGeometry(0.12, R, 0.5),
+      new THREE.MeshPhongMaterial({ color: 0xf8f9fb })
+    );
+    blade.geometry.translate(0, R/2, 0);     // obrót od piasty
+    blade.rotation.x = k * (2*Math.PI/3);
+    blade.castShadow = true;
+    rotor.add(blade);
+  }
+  g.add(rotor);
+  blades.push(rotor);
+
+  // Ślad — półprzezroczysty stożek w dół wiatru (+X)
+  const wake = new THREE.Mesh(
+    new THREE.ConeGeometry(R*1.1, SPACING*2.4, 24, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0xff5a3c, transparent: true, opacity: 0.16, side: THREE.DoubleSide })
+  );
+  wake.rotation.z = -Math.PI/2;             // oś stożka wzdłuż +X
+  wake.position.set(SPACING*1.2 - 0.4, HUB, 0);
+  g.add(wake);
+  wakeMeshes.push(wake);
+
+  g.position.set(px, 0, pz);
+  scene.add(g);
+}
+
+const off = (N-1)*SPACING/2;
+for (let i = 0; i < N; i++)
+  for (let j = 0; j < N; j++)
+    makeTurbine(i*SPACING - off, j*SPACING - off);
+
+// UI
+let spin = 1;
+document.getElementById('spin').addEventListener('input', e => spin = +e.target.value);
+document.getElementById('wakes').addEventListener('change', e => {
+  wakeMeshes.forEach(w => w.visible = e.target.checked);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+let t = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  t += 0.02;
+  blades.forEach((r, idx) => r.rotation.x += 0.03 * spin * (1 - 0.05*(idx%5)));
+  // delikatne falowanie morza
+  for (let i = 0; i < seaPos.count; i++) {
+    const x = seaBase[i*3], z = seaBase[i*3+2];
+    seaPos.array[i*3+1] = Math.sin(x*0.05 + t) * 0.4 + Math.cos(z*0.05 + t*0.8) * 0.4;
+  }
+  seaPos.needsUpdate = true;
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
