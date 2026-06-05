@@ -91,6 +91,78 @@ def show_stored_text(key):
     return False
 
 
+def plot_yaw_comparison(farm, wd, ws, ti, yaw_opt):
+    """Dwa panele flow field obok siebie: PRZED (yaw=0) i PO (yaw zoptymalizowany).
+
+    Rotory turbin są rysowane pod kątem yaw, a ślady (wake) odchylają się — widać
+    od razu, jak sterowanie kierunkiem turbin przekierowuje cień aerodynamiczny
+    z turbin stojących w dół wiatru. Liczby na panelu PO to kąt yaw [°].
+    """
+    import floris.flow_visualization as flowviz
+    import floris.layout_visualization as layoutviz
+
+    fmodel = farm.fmodel
+    n_turb = farm.n_turbines
+    D = farm.D
+    hub = farm.hub_height
+    lx, ly = farm.layout_x, farm.layout_y
+
+    yaw_zero = np.zeros((1, n_turb))
+    yaw_opt = np.asarray(yaw_opt, dtype=float).reshape(1, n_turb)
+
+    # Asymetryczne granice widoku (jak w FarmModel.plot_flow_field): więcej miejsca
+    # w dół wiatru, żeby zmieściły się ślady.
+    margin_up, margin_down, margin_cross = 3 * D, 12 * D, 5 * D
+    wd_rad = np.radians(270.0 - wd)
+    wdx, wdy = np.cos(wd_rad), np.sin(wd_rad)
+    cx, cy = (lx.min() + lx.max()) / 2, (ly.min() + ly.max()) / 2
+    radius = max(lx.max() - lx.min(), ly.max() - ly.min()) / 2 + D
+    x_bounds = (float(cx - radius - margin_up - abs(wdx) * margin_down),
+                float(cx + radius + margin_up + abs(wdx) * margin_down))
+    y_bounds = (float(cy - radius - margin_cross - abs(wdy) * margin_down),
+                float(cy + radius + margin_cross + abs(wdy) * margin_down))
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+    panels = [
+        (axes[0], yaw_zero, "PRZED — bez yaw (0°)"),
+        (axes[1], yaw_opt, "PO — yaw zoptymalizowany"),
+    ]
+    for ax, yaw, label in panels:
+        # Ustaw warunek wiatrowy + kąty yaw NA MODELU (ta wersja FLORIS nie przyjmuje
+        # yaw_angles jako argumentu calculate_horizontal_plane — bierze je z modelu).
+        fmodel.set(wind_directions=[wd], wind_speeds=[ws],
+                   turbulence_intensities=[ti], yaw_angles=yaw)
+        horiz = fmodel.calculate_horizontal_plane(
+            height=hub, x_resolution=200, y_resolution=100,
+            x_bounds=x_bounds, y_bounds=y_bounds,
+        )
+        flowviz.visualize_cut_plane(horiz, ax=ax, label_contours=False, title=label)
+        # Ponownie ustaw warunek + yaw (calculate_horizontal_plane mógł zmienić stan
+        # modelu na siatkę pola) — żeby rotory narysowały się pod właściwym kątem.
+        fmodel.set(wind_directions=[wd], wind_speeds=[ws],
+                   turbulence_intensities=[ti], yaw_angles=yaw)
+        layoutviz.plot_turbine_rotors(fmodel, ax=ax)
+        if label.startswith("PO"):
+            for i, (xx, yy) in enumerate(zip(lx, ly)):
+                a = yaw_opt[0, i]
+                if abs(a) >= 0.5:
+                    ax.annotate(
+                        f"{a:.0f}°", (xx, yy), textcoords="offset points",
+                        xytext=(6, 6), fontsize=7, color="white", fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.1", facecolor="black", alpha=0.4),
+                    )
+        ax.set_xlabel("X [m]")
+        ax.set_ylabel("Y [m]")
+        ax.set_aspect("equal")
+
+    fig.suptitle(
+        f"Wake steering — WD={wd:.0f}° · WS={ws:.1f} m/s · TI={ti:.2f}",
+        fontsize=14, fontweight="500",
+    )
+    fig.tight_layout()
+    return fig
+
+
 # =====================================================================
 # KONFIGURACJA STRONY
 # =====================================================================
@@ -542,6 +614,30 @@ st.divider()
 # =====================================================================
 # TABS
 # =====================================================================
+# Ukrycie zakładek (kontrola na poziomie UI). Admin wybiera w panelu bocznym,
+# viewer ma stały zestaw podstawowych kart.
+#
+# WAŻNE: CSS wstrzykujemy PRZED st.tabs() — żeby reguła `display:none` istniała
+# zanim zakładki się wyrenderują. Wstrzyknięcie PO tabach powodowało mignięcie
+# (zakładki na ułamek sekundy pojawiały się i znikały przy każdym przeładowaniu).
+#
+# Fallback: jeśli z jakiegokolwiek powodu lista widocznych kart byłaby pusta,
+# pokazujemy WSZYSTKIE — żeby admin nigdy nie został bez nawigacji.
+if is_admin:
+    _visible = set(st.session_state.get("admin_visible_tabs") or ALL_TAB_KEYS)
+    if not _visible:
+        _visible = set(ALL_TAB_KEYS)
+else:
+    _visible = set(VIEWER_TABS)
+_hide_idx = [i + 1 for i, k in enumerate(ALL_TAB_KEYS) if k not in _visible]
+if _hide_idx:
+    _sel = ", ".join(
+        f'div[data-baseweb="tab-list"] button[data-baseweb="tab"]:nth-child({i})'
+        for i in _hide_idx
+    )
+    st.markdown(f"<style>{_sel} {{ display: none !important; }}</style>",
+                unsafe_allow_html=True)
+
 (tab_wind, tab_turbines, tab_layout, tab_compare, tab_benchmark, tab_optimize,
  tab_group3, tab_aep, tab_econ, tab_3d, tab_report, tab_trash) = st.tabs(
     [lbl for _, lbl in TAB_META]
@@ -554,21 +650,6 @@ tab_flow = tab_trash          # Flow field (1 bin) → Śmietnik
 tab_lab = tab_optimize        # Lab algorytmów → Optymalizacja
 tab_editor = tab_layout       # Edytor layoutu → Layout
 tab_export = tab_report       # Eksport → Raport / Eksport
-
-# Ukrycie zakładek (kontrola na poziomie UI). Admin wybiera w panelu bocznym,
-# viewer ma stały zestaw podstawowych kart.
-if is_admin:
-    _visible = set(st.session_state.get("admin_visible_tabs", ALL_TAB_KEYS))
-else:
-    _visible = set(VIEWER_TABS)
-_hide_idx = [i + 1 for i, k in enumerate(ALL_TAB_KEYS) if k not in _visible]
-if _hide_idx:
-    _sel = ", ".join(
-        f'div[data-baseweb="tab-list"] button[data-baseweb="tab"]:nth-child({i})'
-        for i in _hide_idx
-    )
-    st.markdown(f"<style>{_sel} {{ display: none !important; }}</style>",
-                unsafe_allow_html=True)
 
 
 # =====================================================================
@@ -911,7 +992,6 @@ with tab_compare:
                 farm.set_wind_data(eval_wind)
 
                 df = pd.DataFrame(results).T
-                st.session_state["df_wake_cmp"] = df
 
                 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
                 colors = ["#534AB7", "#1e5c3a", "#c8531a", "#7a3b00", "#3B8BD4"]
@@ -924,17 +1004,82 @@ with tab_compare:
                 fig.tight_layout()
                 st.session_state["fig_wake_cmp"] = fig_to_bytes(fig)
 
+                # Nazwy modeli jako kolumna (fallback HTML bez pyarrow chowa index → bez tego
+                # ginęłyby etykiety wierszy). Zaokrąglamy dla czytelności.
+                df_show = df.round(2).copy()
+                df_show.insert(0, "Model", df_show.index)
+                st.session_state["df_wake_cmp"] = df_show
+
         show_stored_df("df_wake_cmp")
         show_stored_fig("fig_wake_cmp")
 
+        # --- Wizualizacja śladów (flow field) dla wybranych modeli ---
+        st.divider()
+        st.subheader("🌊 Ślady aerodynamiczne — porównanie modeli")
+        st.caption(
+            "Pole przepływu dla każdego wybranego modelu na **aktywnym layoucie**. "
+            "Ciemne smugi za turbinami = ślady (deficyt prędkości). Widać, jak różne "
+            "modele inaczej szacują zasięg i głębokość śladu."
+        )
+        cwf1, cwf2, cwf3 = st.columns(3)
+        wcmp_wd = cwf1.slider("Kierunek WD [°]", 0.0, 359.0, float(eval_wd), 10.0, key="wcmp_wd")
+        wcmp_ws = cwf2.slider("Prędkość WS [m/s]", 3.0, 20.0, float(eval_ws), 0.5, key="wcmp_ws")
+        wcmp_ti = cwf3.slider("Turbulencja TI", 0.02, 0.20, float(eval_ti), 0.01, key="wcmp_ti")
+
+        if st.button("🌊 Pokaż ślady modeli", key="cmp_wake_ff"):
+            if len(models_to_compare) < 1:
+                st.warning("Wybierz co najmniej 1 model.")
+            else:
+                with st.spinner(f"Generuję flow field dla {len(models_to_compare)} modeli..."):
+                    n_m = len(models_to_compare)
+                    n_cols_fig = min(n_m, 3)
+                    n_rows_fig = int(np.ceil(n_m / n_cols_fig))
+                    fig_wff, axes_wff = plt.subplots(
+                        n_rows_fig, n_cols_fig,
+                        figsize=(6 * n_cols_fig, 5 * n_rows_fig), squeeze=False,
+                    )
+                    for idx, m in enumerate(models_to_compare):
+                        ax = axes_wff[idx // n_cols_fig][idx % n_cols_fig]
+                        try:
+                            farm.switch_wake_model(m)
+                            farm.plot_flow_field(
+                                wind_direction=wcmp_wd, wind_speed=wcmp_ws, ti=wcmp_ti,
+                                ax=ax, title=m.upper(), show_labels=False,
+                                show_wind_arrow=(idx == 0),
+                            )
+                        except Exception as e:
+                            ax.text(0.5, 0.5, f"Błąd:\n{str(e)[:60]}",
+                                    transform=ax.transAxes, ha="center", va="center",
+                                    fontsize=9, wrap=True)
+                            ax.set_title(f"{m.upper()} — BŁĄD")
+                    # Ukryj puste subploty
+                    for idx in range(n_m, n_rows_fig * n_cols_fig):
+                        axes_wff[idx // n_cols_fig][idx % n_cols_fig].set_visible(False)
+                    # Przywróć aktywny model wake + wiatr (farm jest współdzielona)
+                    farm.switch_wake_model(wake_model)
+                    farm.set_wind_data(eval_wind)
+                    fig_wff.suptitle(
+                        f"Ślady wake — {turbine_info['name']} | {farm.n_turbines} turbin | "
+                        f"WD={wcmp_wd:.0f}° WS={wcmp_ws:.1f} m/s",
+                        fontsize=13, fontweight="500",
+                    )
+                    fig_wff.tight_layout()
+                    st.session_state["fig_wake_cmp_ff"] = fig_to_bytes(fig_wff)
+
+        show_stored_fig("fig_wake_cmp_ff")
+
     elif compare_type == "Turbiny":
-        # Filtruj non-floating turbiny do porównania (floating wymaga rebuild)
-        comparable = [k for k in TURBINE_LIBRARY.keys()
-                      if k not in FLOATING_TURBINES and not TURBINE_LIBRARY[k].get("floating")]
+        # Cała biblioteka — łącznie z floating i custom (YAML). Ewentualne błędy
+        # konkretnej turbiny są wychwytywane per turbina w compare_turbines().
+        comparable = list(TURBINE_LIBRARY.keys())
         turbines_to_compare = st.multiselect(
             "Wybierz turbiny", comparable,
             default=[k for k in ["nrel_5MW", "iea_10MW", "iea_15MW", "iea_22MW"] if k in comparable],
-            format_func=lambda x: TURBINE_LIBRARY[x]["name"],
+            format_func=lambda x: (
+                TURBINE_LIBRARY[x]["name"]
+                + (" 🌊" if TURBINE_LIBRARY[x].get("floating") else "")
+                + (" ⭐" if TURBINE_LIBRARY[x].get("custom_yaml") else "")
+            ),
         )
         if st.button("Porównaj turbiny", key="cmp_turb"):
             with st.spinner("Obliczam..."):
@@ -952,9 +1097,70 @@ with tab_compare:
                 farm.set_wind_data(eval_wind)
 
                 rows = [v for v in results.values() if "error" not in v]
-                st.session_state["df_turb_cmp"] = pd.DataFrame(rows)
+                st.session_state["df_turb_cmp"] = pd.DataFrame(rows).round(2)
+                # Turbiny, których nie udało się policzyć (np. floating bez danych)
+                errs = {TURBINE_LIBRARY[k]["name"]: v["error"]
+                        for k, v in results.items() if "error" in v}
+                st.session_state["turb_cmp_errors"] = errs
 
         show_stored_df("df_turb_cmp")
+        if st.session_state.get("turb_cmp_errors"):
+            for nm, err in st.session_state["turb_cmp_errors"].items():
+                st.warning(f"⚠️ {nm}: nie udało się policzyć ({err[:60]})")
+
+        # --- Wizualizacja śladów (flow field) dla wybranych turbin ---
+        st.divider()
+        st.subheader("🌊 Ślady aerodynamiczne — porównanie turbin")
+        st.caption(
+            "Pole przepływu dla każdej wybranej turbiny na siatce o tym samym rozstawie "
+            f"(**{spacing_D:.0f}×D**, {n_rows}×{n_cols}). Uwaga: większa turbina = większa "
+            "średnica D, więc fizyczny rozstaw w metrach też rośnie — dlatego skala każdego "
+            "panelu jest inna."
+        )
+        ctf1, ctf2, ctf3 = st.columns(3)
+        tcmp_wd = ctf1.slider("Kierunek WD [°]", 0.0, 359.0, float(eval_wd), 10.0, key="tcmp_wd")
+        tcmp_ws = ctf2.slider("Prędkość WS [m/s]", 3.0, 20.0, float(eval_ws), 0.5, key="tcmp_ws")
+        tcmp_ti = ctf3.slider("Turbulencja TI", 0.02, 0.20, float(eval_ti), 0.01, key="tcmp_ti")
+
+        if st.button("🌊 Pokaż ślady turbin", key="cmp_turb_ff"):
+            if len(turbines_to_compare) < 1:
+                st.warning("Wybierz co najmniej 1 turbinę.")
+            else:
+                with st.spinner(f"Generuję flow field dla {len(turbines_to_compare)} turbin..."):
+                    n_t = len(turbines_to_compare)
+                    n_cols_fig = min(n_t, 3)
+                    n_rows_fig = int(np.ceil(n_t / n_cols_fig))
+                    fig_tff, axes_tff = plt.subplots(
+                        n_rows_fig, n_cols_fig,
+                        figsize=(6 * n_cols_fig, 5 * n_rows_fig), squeeze=False,
+                    )
+                    for idx, t in enumerate(turbines_to_compare):
+                        ax = axes_tff[idx // n_cols_fig][idx % n_cols_fig]
+                        try:
+                            # Świeży model per turbina — różne D, więc różny layout.
+                            ft = FarmModel(wake_model=wake_model, turbine=t)
+                            ft.set_layout_grid(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D)
+                            ft.plot_flow_field(
+                                wind_direction=tcmp_wd, wind_speed=tcmp_ws, ti=tcmp_ti,
+                                ax=ax, title=TURBINE_LIBRARY[t]["name"], show_labels=False,
+                                show_wind_arrow=(idx == 0),
+                            )
+                        except Exception as e:
+                            ax.text(0.5, 0.5, f"Błąd:\n{str(e)[:60]}",
+                                    transform=ax.transAxes, ha="center", va="center",
+                                    fontsize=9, wrap=True)
+                            ax.set_title(f"{TURBINE_LIBRARY[t]['name']} — BŁĄD")
+                    for idx in range(n_t, n_rows_fig * n_cols_fig):
+                        axes_tff[idx // n_cols_fig][idx % n_cols_fig].set_visible(False)
+                    fig_tff.suptitle(
+                        f"Ślady wake — model {wake_model.upper()} | siatka {n_rows}×{n_cols} @ {spacing_D:.0f}D | "
+                        f"WD={tcmp_wd:.0f}° WS={tcmp_ws:.1f} m/s",
+                        fontsize=13, fontweight="500",
+                    )
+                    fig_tff.tight_layout()
+                    st.session_state["fig_turb_cmp_ff"] = fig_to_bytes(fig_tff)
+
+        show_stored_fig("fig_turb_cmp_ff")
 
     elif compare_type == "Spacing sweep":
         sp_min, sp_max = st.slider("Zakres [×D]", 3.0, 15.0, (5.0, 12.0), 0.5)
@@ -1365,8 +1571,11 @@ with tab_benchmark:
 # =====================================================================
 # TAB 6: OPTYMALIZACJA (layout) — Yaw przeniesiony do zakładki Grupa 3
 # =====================================================================
-with tab_optimize:
-    st.header("Optymalizacja layoutu")
+# Przeniesione do Śmietnika: pokrywa się z 🧪 Lab algorytmów (który ma te same
+# metody + więcej). Zostaje dostępne, ale nie zaśmieca głównej zakładki Optymalizacja.
+with tab_trash:
+    st.divider()
+    st.header("Optymalizacja layoutu (wycofane — patrz 🧪 Lab algorytmów)")
     st.caption(f"🌬️ Wiatr obliczeniowy: **{eval_desc}** (zmień w zakładce 🌬️ Wiatr)")
     st.caption(
         "Optymalizacja FLORIS dla pełnej róży wiatrów. "
@@ -1841,22 +2050,35 @@ Tabela: brak / yaw / curtailment / helix / kombinacje — AEP, % zmiany AEP, cza
 
     # ----- B. Yaw (przeniesione z zakładki Optymalizacja) -----
     elif g3_section == "🎯 Yaw (wake steering)":
-        st.subheader("Optymalizacja kątów yaw")
+        st.subheader("Optymalizacja kątów yaw (wake steering)")
         st.caption(
-            "FLORIS YawOptimizationSR (SerialRefine) — znajduje optymalne kąty yaw "
-            "per kierunek wiatru. Eksport schedule poniżej."
+            "FLORIS YawOptimizationSR (SerialRefine) znajduje optymalne kąty obrotu "
+            "turbin dla wybranego kierunku wiatru. Turbiny upstream celowo patrzą lekko "
+            "obok wiatru, żeby ich ślad ominął turbiny w dół wiatru → cała farma produkuje więcej."
         )
 
+        # Warunek wiatrowy dla tej sekcji (jeden kierunek = czytelne ślady).
+        st.markdown("**1. Warunek wiatrowy** (domyślnie z globalnego wiatru obliczeniowego)")
+        vc1, vc2, vc3 = st.columns(3)
+        viz_wd = vc1.slider("Kierunek WD [°]", 0.0, 359.0, float(eval_wd), 10.0, key="g3_viz_wd")
+        viz_ws = vc2.slider("Prędkość WS [m/s]", 3.0, 20.0, float(eval_ws), 0.5, key="g3_viz_ws")
+        viz_ti = vc3.slider("Turbulencja TI", 0.02, 0.20, float(eval_ti), 0.01, key="g3_viz_ti")
+
+        st.markdown("**2. Zakres dozwolonych kątów yaw**")
         col_y1, col_y2 = st.columns(2)
         yaw_max = col_y1.slider("Max kąt yaw [°]", 10.0, 35.0, 25.0, 5.0, key="yaw_max")
         yaw_min = col_y2.slider("Min kąt yaw [°]", -35.0, 0.0, 0.0, 5.0, key="yaw_min")
 
-        if st.button("🎯 Optymalizuj yaw", key="g3_opt_yaw"):
-            with st.spinner("Optymalizacja yaw..."):
-                wr_coarse = eval_wind
-                farm.set_wind_data(wr_coarse)
-                opt = Optimizer(farm)
+        if st.button("🎯 Optymalizuj yaw i pokaż ślady", key="g3_opt_yaw", type="primary"):
+            with st.spinner("Optymalizacja yaw + rysowanie śladów przed/po..."):
                 try:
+                    viz_wind = TimeSeries(
+                        wind_directions=np.array([viz_wd]),
+                        wind_speeds=np.array([viz_ws]),
+                        turbulence_intensities=np.array([viz_ti]),
+                    )
+                    farm.set_wind_data(viz_wind)
+                    opt = Optimizer(farm)
                     result_yaw = opt.optimize_yaw(yaw_min=yaw_min, yaw_max=yaw_max)
                     st.session_state["g3_yaw_result"] = {
                         "before": result_yaw.initial_aep_gwh,
@@ -1865,21 +2087,56 @@ Tabela: brak / yaw / curtailment / helix / kombinacje — AEP, % zmiany AEP, cza
                         "time": result_yaw.elapsed_seconds,
                         "yaw_angles": result_yaw.yaw_angles,
                     }
-                    fig = opt.plot_yaw_result(result_yaw)
-                    st.session_state["g3_fig_yaw"] = fig_to_bytes(fig)
+                    # Główna wizualizacja: ślady przed/po (layout z kątami yaw)
+                    fig_cmp = plot_yaw_comparison(farm, viz_wd, viz_ws, viz_ti, result_yaw.yaw_angles)
+                    st.session_state["g3_fig_yaw_cmp"] = fig_to_bytes(fig_cmp)
+                    # Szczegóły: mapa kątów yaw per turbina
+                    fig_hm = opt.plot_yaw_result(result_yaw)
+                    st.session_state["g3_fig_yaw"] = fig_to_bytes(fig_hm)
+                    st.session_state.pop("g3_yaw_error", None)
                 except Exception as e:
                     st.session_state["g3_yaw_error"] = str(e)
-                farm.set_wind_data(eval_wind)
+                finally:
+                    try:
+                        farm.fmodel.reset_operation()
+                    except Exception:
+                        pass
+                    farm.set_wind_data(eval_wind)
+
+        if "g3_yaw_error" in st.session_state:
+            st.error(st.session_state["g3_yaw_error"])
 
         if "g3_yaw_result" in st.session_state:
             r = st.session_state["g3_yaw_result"]
             col1, col2, col3 = st.columns(3)
-            col1.metric("AEP bez yaw", f"{r['before']:.1f} GWh")
-            col2.metric("AEP z yaw", f"{r['after']:.1f} GWh", f"+{r['pct']:.2f}%")
-            col3.metric("Czas", f"{r['time']:.0f}s")
-        show_stored_fig("g3_fig_yaw")
-        if "g3_yaw_error" in st.session_state:
-            st.error(st.session_state["g3_yaw_error"])
+            col1.metric("Moc bez yaw", f"{r['before']:.1f} GWh")
+            col2.metric("Moc z yaw", f"{r['after']:.1f} GWh", f"+{r['pct']:.2f}%")
+            col3.metric("Czas obliczeń", f"{r['time']:.0f}s")
+            st.caption(
+                "ℹ️ Wartości to wskaźnik mocy farmy dla **tego jednego** warunku "
+                "wiatrowego (nie roczny AEP)."
+            )
+
+        # Główny wynik: ślady przed/po
+        if "g3_fig_yaw_cmp" in st.session_state:
+            st.markdown("#### 🔍 Layout + ślady aerodynamiczne — przed vs po")
+            st.caption(
+                "**Lewy panel:** turbiny zwrócone prosto na wiatr (yaw=0°) — ślady "
+                "(ciemne smugi) trafiają wprost w turbiny w dół wiatru. **Prawy panel:** "
+                "turbiny obrócone o optymalny kąt — rotory przekręcone, ślady odchylają "
+                "się **obok** turbin downstream. Liczby = kąt yaw [°]."
+            )
+        show_stored_fig("g3_fig_yaw_cmp")
+
+        # Szczegóły: mapa kątów (dla zainteresowanych / pełnej róży)
+        if "g3_fig_yaw" in st.session_state:
+            with st.expander("📊 Szczegóły: mapa kątów yaw per turbina"):
+                st.caption(
+                    "Lewy = kąt yaw każdej turbiny (kolor = stopnie; czerwony/niebieski "
+                    "= obrót w prawo/lewo). Prawy = średni |yaw| na turbinę. Przy jednym "
+                    "kierunku wiatru lewy panel ma 1 kolumnę — to normalne."
+                )
+                show_stored_fig("g3_fig_yaw")
 
         # Yaw max sweep
         st.divider()
@@ -1903,10 +2160,10 @@ Tabela: brak / yaw / curtailment / helix / kombinacje — AEP, % zmiany AEP, cza
                     except Exception as e:
                         sweep_results.append({"yaw_max": ym, "aep": None, "error": str(e)[:40]})
                 farm.set_wind_data(eval_wind)
-                st.session_state["g3_yaw_sweep"] = sweep_results
+                st.session_state["g3_yaw_sweep_data"] = sweep_results
 
-        if "g3_yaw_sweep" in st.session_state:
-            sweep = st.session_state["g3_yaw_sweep"]
+        if "g3_yaw_sweep_data" in st.session_state:
+            sweep = st.session_state["g3_yaw_sweep_data"]
             df_sweep = pd.DataFrame(sweep)
             st.dataframe(df_sweep, hide_index=True, use_container_width=True)
             valid_sweep = [s for s in sweep if s.get("aep") is not None]
@@ -2078,12 +2335,12 @@ helix_dict["wake"]["enable_active_wake_mixing"] = True
                         results.append({"Strategia": "Yaw (SerialRefine)", "AEP [GWh]": "ERR", "Δ [%]": str(e)[:30]})
 
                     farm.set_wind_data(eval_wind)
-                    st.session_state["g3_compare"] = results
+                    st.session_state["g3_compare_data"] = results
                 except Exception as e:
                     st.session_state["g3_compare_error"] = str(e)
 
-        if "g3_compare" in st.session_state:
-            st.dataframe(pd.DataFrame(st.session_state["g3_compare"]), hide_index=True, use_container_width=True)
+        if "g3_compare_data" in st.session_state:
+            st.dataframe(pd.DataFrame(st.session_state["g3_compare_data"]), hide_index=True, use_container_width=True)
             st.caption(
                 "**TODO Grupy 3:** dodać wiersze: Curtailment (best greedy), "
                 "Helix (AWM), Yaw+Helix, Yaw+Curtailment."
@@ -2836,87 +3093,109 @@ with tab_3d:
 
     viz_type = st.radio(
         "Typ wizualizacji",
-        ["Layout 3D", "Profil wiatru 3D", "Mapa mocy 3D"],
+        ["Layout 3D", "Turbiny + ślady 3D", "Profil wiatru 3D", "Mapa mocy 3D"],
         horizontal=True,
     )
 
     if viz_type == "Layout 3D":
-        st.caption("Widok 3D rozmieszczenia turbin z proporcjonalnymi rotorami.")
+        st.caption(
+            "Realistyczny widok 3D: wieże, gondole i 3-łopatowe rotory zwrócone na wiatr, "
+            "na powierzchni morza. Geometria turbin jest **proporcjonalnie powiększona** "
+            "względem pola (inaczej przy realnej skali byłyby ledwo widoczne)."
+        )
+        exagg = st.slider(
+            "Powiększenie turbin (×)", 1.0, 12.0, 5.0, 0.5, key="d3_exagg",
+            help="Tylko wizualne — pozycje turbin pozostają dokładne.",
+        )
 
         if st.button("🌐 Generuj widok 3D", key="gen_3d_layout"):
             try:
                 import plotly.graph_objects as go
 
-                x = farm.layout_x
-                y = farm.layout_y
+                x = np.asarray(farm.layout_x, dtype=float)
+                y = np.asarray(farm.layout_y, dtype=float)
+                n = len(x)
                 D = turbine_info["diameter"]
                 hh = turbine_info["hub_height"]
+                # Skala wizualna geometrii (pozycje bez zmian, aspectmode="data" → brak
+                # zniekształceń osi; powiększamy tylko same turbiny, żeby były widoczne).
+                s = float(exagg)
+                R = (D / 2.0) * s
+                H = hh * s
+
+                # Kierunek wiatru → orientacja rotorów (oś rotora wzdłuż wiatru).
+                wd_rad = np.radians(270.0 - eval_wd)
+                px, py = -np.sin(wd_rad), np.cos(wd_rad)  # poziom w płaszczyźnie rotora
 
                 fig3d = go.Figure()
 
-                # Wieże (linie pionowe)
-                for i in range(len(x)):
-                    fig3d.add_trace(go.Scatter3d(
-                        x=[x[i], x[i]], y=[y[i], y[i]], z=[0, hh],
-                        mode="lines",
-                        line=dict(color="#888888", width=4),
-                        showlegend=False,
-                        hoverinfo="skip",
-                    ))
+                # --- Morze (powierzchnia z delikatną teksturą fal) ---
+                pad = 3 * D
+                xs = np.linspace(x.min() - pad, x.max() + pad, 45)
+                ys = np.linspace(y.min() - pad, y.max() + pad, 45)
+                XX, YY = np.meshgrid(xs, ys)
+                wave = np.sin(XX / (1.5 * D)) + np.cos(YY / (1.5 * D))
+                ZZ = wave * (0.01 * D)  # prawie płasko — tylko tekstura
+                fig3d.add_trace(go.Surface(
+                    x=xs, y=ys, z=ZZ, surfacecolor=wave,
+                    colorscale=[[0, "#0a3d62"], [0.5, "#1a6fa3"], [1, "#4a9fd4"]],
+                    opacity=0.6, showscale=False, name="Morze", hoverinfo="skip",
+                ))
 
-                # Hub points
+                # --- Wieże (jeden trace z separatorami None) ---
+                tx, ty, tz = [], [], []
+                for i in range(n):
+                    tx += [x[i], x[i], None]
+                    ty += [y[i], y[i], None]
+                    tz += [0.0, H, None]
                 fig3d.add_trace(go.Scatter3d(
-                    x=x, y=y, z=np.full_like(x, hh),
+                    x=tx, y=ty, z=tz, mode="lines",
+                    line=dict(color="#e8ebee", width=6),
+                    showlegend=False, hoverinfo="skip",
+                ))
+
+                # --- Łopaty (3 na turbinę, co 120°, w płaszczyźnie rotora) ---
+                bx, by, bz = [], [], []
+                for i in range(n):
+                    for a_deg in (90, 210, 330):
+                        a = np.radians(a_deg)
+                        ex = x[i] + R * np.cos(a) * px
+                        ey = y[i] + R * np.cos(a) * py
+                        ez = H + R * np.sin(a)
+                        bx += [x[i], ex, None]
+                        by += [y[i], ey, None]
+                        bz += [H, ez, None]
+                fig3d.add_trace(go.Scatter3d(
+                    x=bx, y=by, z=bz, mode="lines",
+                    line=dict(color="#f8f9fb", width=5),
+                    showlegend=False, hoverinfo="skip",
+                ))
+
+                # --- Gondole / huby + etykiety ---
+                fig3d.add_trace(go.Scatter3d(
+                    x=x, y=y, z=np.full(n, H),
                     mode="markers+text",
-                    marker=dict(size=8, color="#1e5c3a", symbol="circle"),
-                    text=[f"T{i}" for i in range(len(x))],
+                    marker=dict(size=5, color="#1e5c3a", symbol="circle",
+                                line=dict(color="white", width=1)),
+                    text=[f"T{i}" for i in range(n)],
                     textposition="top center",
-                    textfont=dict(size=9),
+                    textfont=dict(size=9, color="#2c3e50"),
                     name="Turbiny",
                     hovertemplate="Turbina %{text}<br>X: %{x:.0f}m<br>Y: %{y:.0f}m<extra></extra>",
                 ))
 
-                # Koła rotorów (przybliżone)
-                theta = np.linspace(0, 2 * np.pi, 36)
-                for i in range(len(x)):
-                    rx = x[i] + np.zeros_like(theta)
-                    ry = y[i] + (D / 2) * np.cos(theta)
-                    rz = hh + (D / 2) * np.sin(theta)
-                    fig3d.add_trace(go.Scatter3d(
-                        x=rx, y=ry, z=rz,
-                        mode="lines",
-                        line=dict(color="#1e5c3a", width=2),
-                        showlegend=False,
-                        hoverinfo="skip",
-                    ))
-
-                # Podłoże (morze)
-                x_range = [x.min() - 2 * D, x.max() + 2 * D]
-                y_range = [y.min() - 2 * D, y.max() + 2 * D]
-                fig3d.add_trace(go.Mesh3d(
-                    x=[x_range[0], x_range[1], x_range[1], x_range[0]],
-                    y=[y_range[0], y_range[0], y_range[1], y_range[1]],
-                    z=[0, 0, 0, 0],
-                    i=[0, 0], j=[1, 2], k=[2, 3],
-                    color="#1a5276",
-                    opacity=0.3,
-                    name="Morze",
-                    hoverinfo="skip",
-                ))
-
                 fig3d.update_layout(
                     scene=dict(
-                        xaxis_title="X [m]",
-                        yaxis_title="Y [m]",
-                        zaxis_title="Z [m]",
+                        xaxis_title="X [m]", yaxis_title="Y [m]", zaxis_title="Z [m]",
                         aspectmode="data",
-                        camera=dict(
-                            eye=dict(x=1.5, y=1.5, z=0.8),
-                        ),
+                        camera=dict(eye=dict(x=1.6, y=1.6, z=0.55)),
+                        xaxis=dict(backgroundcolor="#eaf2f8", gridcolor="#cdd9e5"),
+                        yaxis=dict(backgroundcolor="#eaf2f8", gridcolor="#cdd9e5"),
+                        zaxis=dict(backgroundcolor="#f4f9fd", gridcolor="#dbe7f0"),
                     ),
-                    title=f"Farma 3D — {turbine_info['name']} | {farm.n_turbines} turbin",
-                    height=700,
-                    margin=dict(l=0, r=0, t=40, b=0),
+                    title=f"Farma 3D — {turbine_info['name']} | {n} turbin | wiatr {eval_wd:.0f}° (turbiny ×{s:.0f})",
+                    height=720, margin=dict(l=0, r=0, t=40, b=0),
+                    paper_bgcolor="white",
                 )
 
                 st.session_state["fig_3d_layout"] = fig3d
@@ -2926,6 +3205,126 @@ with tab_3d:
 
         if "fig_3d_layout" in st.session_state:
             st.plotly_chart(st.session_state["fig_3d_layout"], use_container_width=True)
+
+    elif viz_type == "Turbiny + ślady 3D":
+        st.caption(
+            "Turbiny 3D (jak w Layout 3D) **plus pole prędkości wiatru na wysokości "
+            "wirnika** — czerwone/ciemne smugi ciągnące się za turbinami to ślady "
+            "aerodynamiczne (wake). Geometria turbin jest powiększona dla czytelności."
+        )
+        cw1, cw2, cw3 = st.columns(3)
+        ws_wd = cw1.slider("Kierunek WD [°]", 0.0, 359.0, float(eval_wd), 10.0, key="ws3_wd")
+        ws_ws = cw2.slider("Prędkość WS [m/s]", 3.0, 20.0, float(eval_ws), 0.5, key="ws3_ws")
+        ws_ex = cw3.slider("Powiększenie turbin (×)", 1.0, 12.0, 5.0, 0.5, key="ws3_ex")
+
+        if st.button("🌐 Generuj turbiny + ślady", key="gen_3d_wake"):
+            try:
+                import plotly.graph_objects as go
+                from scipy.interpolate import griddata
+
+                x = np.asarray(farm.layout_x, dtype=float)
+                y = np.asarray(farm.layout_y, dtype=float)
+                n = len(x)
+                D = turbine_info["diameter"]
+                hh = turbine_info["hub_height"]
+                s = float(ws_ex)
+                R = (D / 2.0) * s
+                H = hh * s
+
+                # --- Pole prędkości na wysokości wirnika (z poprawką griddata) ---
+                farm.fmodel.set(wind_directions=[ws_wd], wind_speeds=[ws_ws],
+                                turbulence_intensities=[0.06])
+                pad = 3 * D
+                xb = (float(x.min() - pad), float(x.max() + 8 * D))
+                yb = (float(y.min() - pad), float(y.max() + pad))
+                hp = farm.fmodel.calculate_horizontal_plane(
+                    height=hh, x_resolution=120, y_resolution=120,
+                    x_bounds=xb, y_bounds=yb,
+                )
+                dfh = hp.df
+                uc = "u" if "u" in dfh.columns else dfh.columns[-1]
+                pts = dfh[["x1", "x2"]].values
+                vals = dfh[uc].replace([np.inf, -np.inf], np.nan).values
+                gx = np.linspace(dfh["x1"].min(), dfh["x1"].max(), 100)
+                gy = np.linspace(dfh["x2"].min(), dfh["x2"].max(), 100)
+                GX, GY = np.meshgrid(gx, gy)
+                Zspd = griddata(pts, vals, (GX, GY), method="linear")
+                Zspd = np.where(np.isnan(Zspd), griddata(pts, vals, (GX, GY), method="nearest"), Zspd)
+
+                wd_rad = np.radians(270.0 - ws_wd)
+                px, py = -np.sin(wd_rad), np.cos(wd_rad)
+
+                fig3d = go.Figure()
+
+                # Pole prędkości jako pozioma płaszczyzna na wysokości wirnika (z=H)
+                fig3d.add_trace(go.Surface(
+                    x=gx, y=gy, z=np.full_like(GX, H),
+                    surfacecolor=Zspd, colorscale="RdYlGn",
+                    cmin=float(np.nanmin(Zspd)), cmax=float(np.nanmax(Zspd)),
+                    colorbar=dict(title="m/s", len=0.6),
+                    opacity=0.8, name="Wiatr", showscale=True,
+                    hovertemplate="X:%{x:.0f}m Y:%{y:.0f}m<br>V:%{surfacecolor:.2f} m/s<extra></extra>",
+                ))
+
+                # Wieże (jeden trace)
+                tx, ty, tz = [], [], []
+                for i in range(n):
+                    tx += [x[i], x[i], None]; ty += [y[i], y[i], None]; tz += [0.0, H, None]
+                fig3d.add_trace(go.Scatter3d(
+                    x=tx, y=ty, z=tz, mode="lines",
+                    line=dict(color="#4a4a45", width=5),
+                    showlegend=False, hoverinfo="skip",
+                ))
+
+                # Łopaty (3 na turbinę, w płaszczyźnie rotora zwróconej na wiatr)
+                bx, by, bz = [], [], []
+                for i in range(n):
+                    for a_deg in (90, 210, 330):
+                        a = np.radians(a_deg)
+                        bx += [x[i], x[i] + R * np.cos(a) * px, None]
+                        by += [y[i], y[i] + R * np.cos(a) * py, None]
+                        bz += [H, H + R * np.sin(a), None]
+                fig3d.add_trace(go.Scatter3d(
+                    x=bx, y=by, z=bz, mode="lines",
+                    line=dict(color="#2c3e50", width=4),
+                    showlegend=False, hoverinfo="skip",
+                ))
+
+                # Huby + etykiety
+                fig3d.add_trace(go.Scatter3d(
+                    x=x, y=y, z=np.full(n, H),
+                    mode="markers+text",
+                    marker=dict(size=4, color="#2c3e50"),
+                    text=[f"T{i}" for i in range(n)],
+                    textposition="top center", textfont=dict(size=8, color="#2c3e50"),
+                    name="Turbiny",
+                    hovertemplate="Turbina %{text}<extra></extra>",
+                ))
+
+                fig3d.update_layout(
+                    title=(
+                        f"Turbiny + ślady 3D — {turbine_info['name']} | "
+                        f"WD={ws_wd:.0f}° WS={ws_ws:.1f} m/s | {wake_model.upper()} (turbiny ×{s:.0f})"
+                    ),
+                    scene=dict(
+                        xaxis_title="X [m]", yaxis_title="Y [m]", zaxis_title="Z [m]",
+                        aspectmode="data",
+                        camera=dict(eye=dict(x=1.6, y=1.6, z=0.7)),
+                    ),
+                    height=740, margin=dict(l=0, r=0, t=40, b=0),
+                )
+                st.session_state["fig_3d_wake"] = fig3d
+                farm.set_wind_data(eval_wind)
+
+            except ImportError:
+                st.error("Plotly/scipy nie są zainstalowane.")
+            except Exception as e:
+                st.error(f"Błąd: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+
+        if "fig_3d_wake" in st.session_state:
+            st.plotly_chart(st.session_state["fig_3d_wake"], use_container_width=True)
 
     elif viz_type == "Profil wiatru 3D":
         st.caption("Rozkład prędkości wiatru w 3D — heatmap z wysokością = prędkość.")
@@ -2964,31 +3363,31 @@ with tab_3d:
 
                 df_flow = hp.df
                 u_col = "u" if "u" in df_flow.columns else df_flow.columns[-1]
-
-                # Zamień NaN/inf
                 df_flow[u_col] = df_flow[u_col].replace([np.inf, -np.inf], np.nan)
-                df_flow[u_col] = df_flow[u_col].fillna(df_flow[u_col].median())
 
-                # Pivot do 2D grid
-                Z = df_flow.pivot_table(
-                    values=u_col, index="x2", columns="x1",
-                    aggfunc="mean",
-                ).values
-                x_unique = np.sort(df_flow["x1"].unique())
-                y_unique = np.sort(df_flow["x2"].unique())
-
-                # Wypełnij ewentualne NaN w Z
-                Z = np.nan_to_num(Z, nan=float(np.nanmedian(Z)))
+                # FLORIS obraca siatkę próbkowania o kierunek wiatru, więc punkty NIE
+                # leżą na regularnej kratce (x1/x2 mają setki unikalnych wartości — stąd
+                # poprzedni pivot_table dawał macierz 200×200 prawie samych NaN → pusty
+                # wykres). Interpolujemy prędkość na własną, regularną siatkę.
+                from scipy.interpolate import griddata
+                pts = df_flow[["x1", "x2"]].values
+                vals = df_flow[u_col].values
+                gx = np.linspace(df_flow["x1"].min(), df_flow["x1"].max(), 90)
+                gy = np.linspace(df_flow["x2"].min(), df_flow["x2"].max(), 90)
+                GX, GY = np.meshgrid(gx, gy)
+                Z = griddata(pts, vals, (GX, GY), method="linear")
+                Z_near = griddata(pts, vals, (GX, GY), method="nearest")
+                Z = np.where(np.isnan(Z), Z_near, Z)  # uzupełnij brzegi
 
                 fig3d = go.Figure()
 
                 fig3d.add_trace(go.Surface(
-                    x=x_unique,
-                    y=y_unique,
+                    x=gx,
+                    y=gy,
                     z=Z,
                     colorscale="RdYlGn",
                     colorbar=dict(title="m/s", len=0.6),
-                    opacity=0.92,
+                    opacity=0.95,
                     name="Prędkość",
                     hovertemplate="X: %{x:.0f}m<br>Y: %{y:.0f}m<br>V: %{z:.2f} m/s<extra></extra>",
                 ))
@@ -3034,7 +3433,11 @@ with tab_3d:
             st.plotly_chart(st.session_state["fig_3d_wind"], use_container_width=True)
 
     elif viz_type == "Mapa mocy 3D":
-        st.caption("Średnia moc per turbina jako słupki 3D na mapie farmy.")
+        st.caption(
+            "Średnia moc każdej turbiny jako **słupek 3D** na mapie farmy. Wysokość i kolor "
+            "słupka = moc (zielony/wysoki = pełna moc, czerwony/niski = turbina w cieniu "
+            f"aerodynamicznym). Liczona dla aktywnego wiatru ({eval_desc})."
+        )
 
         if st.button("🌐 Generuj mapę mocy", key="gen_3d_power"):
             try:
@@ -3043,71 +3446,93 @@ with tab_3d:
                 farm.set_wind_data(eval_wind)
                 farm.run()
                 powers_per_turbine = farm.get_turbine_powers_mw()
-                # Bezpieczna konwersja — flatten na 1D
                 mean_power = np.nanmean(powers_per_turbine, axis=0).flatten()
 
                 x = farm.layout_x.flatten()
                 y = farm.layout_y.flatten()
-                D = turbine_info["diameter"]
+                n = len(x)
+                max_p = float(np.nanmax(mean_power)) or 1.0
+                min_p = float(np.nanmin(mean_power))
 
-                max_p = float(np.nanmax(mean_power))
-                bar_h_scale = float(turbine_info["hub_height"]) * 0.8
+                # Wysokość słupka skalowana do ROZMIARU POLA — przy aspectmode="data"
+                # realne metry słupka (~100 m) byłyby niewidoczne obok pola ~7000 m.
+                # Najwyższy słupek ≈ 35% rozpiętości farmy.
+                span = max(float(x.max() - x.min()), float(y.max() - y.min()), 1.0)
+                H_max = 0.35 * span
+                heights = (mean_power / max_p) * H_max
+
+                def _rgb(cval):
+                    r, g, b, _ = plt.cm.RdYlGn(float(np.clip(cval, 0, 1)))
+                    return f"rgb({int(r*255)},{int(g*255)},{int(b*255)})"
 
                 fig3d = go.Figure()
 
-                # Słupki mocy z go.Bar3d nie istnieje — użyj Scatter3d z markerami
-                colors_power = []
-                heights = []
-                for i in range(len(x)):
-                    p = float(mean_power[i])
-                    cv = p / max_p if max_p > 0 else 0
-                    colors_power.append(cv)
-                    heights.append(p)
-
-                # Scatter3d — rozmiar = moc
-                fig3d.add_trace(go.Scatter3d(
-                    x=x, y=y, z=[0.0] * len(x),
-                    mode="markers+text",
-                    marker=dict(
-                        size=[max(6, h / max_p * 25) if max_p > 0 else 8 for h in heights],
-                        color=heights,
-                        colorscale="RdYlGn",
-                        colorbar=dict(title="MW", len=0.6),
-                        opacity=0.9,
-                    ),
-                    text=[f"T{i}: {float(mean_power[i]):.1f} MW" for i in range(len(x))],
-                    textposition="top center",
-                    textfont=dict(size=8),
-                    name="Moc",
-                    hovertemplate="T%{text}<br>X: %{x:.0f}m<br>Y: %{y:.0f}m<extra></extra>",
+                # Płaszczyzna dna (z=0) — kotwiczy słupki, żeby wysokość była czytelna
+                # i znikało złudzenie "pływających kropek".
+                pad = 0.15 * span
+                gx0, gx1 = float(x.min() - pad), float(x.max() + pad)
+                gy0, gy1 = float(y.min() - pad), float(y.max() + pad)
+                fig3d.add_trace(go.Surface(
+                    x=[gx0, gx1], y=[gy0, gy1], z=[[0, 0], [0, 0]],
+                    colorscale=[[0, "#dce6ef"], [1, "#dce6ef"]],
+                    opacity=0.35, showscale=False, hoverinfo="skip", name="dno",
                 ))
 
-                # Wieże
-                for i in range(len(x)):
-                    h_bar = float(mean_power[i]) / max_p * bar_h_scale if max_p > 0 else 0
+                # Strzałka kierunku wiatru przy krawędzi (z=0)
+                wd_rad = np.radians(270.0 - eval_wd)
+                adx, ady = np.cos(wd_rad), np.sin(wd_rad)
+                a0x, a0y = gx0 + 0.1 * (gx1 - gx0), gy1
+                alen = 0.25 * span
+                fig3d.add_trace(go.Scatter3d(
+                    x=[a0x, a0x + adx * alen], y=[a0y, a0y + ady * alen], z=[0, 0],
+                    mode="lines+text", line=dict(color="#1a6fa3", width=8),
+                    text=["", f"wiatr {eval_wd:.0f}°"], textposition="top center",
+                    textfont=dict(size=11, color="#1a6fa3"),
+                    showlegend=False, hoverinfo="skip",
+                ))
+
+                # Słupki mocy (per turbina, kolor = moc) — batchowane jako linie
+                for i in range(n):
                     fig3d.add_trace(go.Scatter3d(
                         x=[float(x[i]), float(x[i])],
                         y=[float(y[i]), float(y[i])],
-                        z=[0, h_bar],
+                        z=[0.0, float(heights[i])],
                         mode="lines",
-                        line=dict(
-                            color=f"rgb({int(255 * (1 - float(mean_power[i]) / max_p))},{int(200 * float(mean_power[i]) / max_p)},80)" if max_p > 0 else "rgb(128,128,80)",
-                            width=8,
-                        ),
-                        showlegend=False,
-                        hoverinfo="skip",
+                        line=dict(width=12, color=_rgb(mean_power[i] / max_p)),
+                        showlegend=False, hoverinfo="skip",
                     ))
 
-                fig3d.update_layout(
-                    title=f"Średnia moc per turbina — {turbine_info['name']}",
-                    scene=dict(
-                        xaxis_title="X [m]",
-                        yaxis_title="Y [m]",
-                        zaxis_title="Moc skalowana [MW]",
-                        aspectmode="data",
-                        camera=dict(eye=dict(x=1.5, y=1.5, z=1.0)),
+                # Wierzchołki słupków: marker + etykieta + colorbar
+                fig3d.add_trace(go.Scatter3d(
+                    x=x, y=y, z=heights,
+                    mode="markers+text",
+                    marker=dict(
+                        size=6, color=mean_power, colorscale="RdYlGn",
+                        cmin=min_p, cmax=max_p,
+                        colorbar=dict(title="MW", len=0.6),
+                        line=dict(color="white", width=1),
                     ),
-                    height=700,
+                    text=[f"T{i}: {float(mean_power[i]):.1f} MW" for i in range(n)],
+                    textposition="top center",
+                    textfont=dict(size=8, color="#2c3e50"),
+                    name="Moc",
+                    # %{text} już zawiera "T{i}: x MW" — bez dodatkowego "T" (był bug "TT15").
+                    hovertemplate="%{text}<br>X: %{x:.0f}m<br>Y: %{y:.0f}m<extra></extra>",
+                ))
+
+                fig3d.update_layout(
+                    title=(
+                        f"Średnia moc per turbina — {turbine_info['name']} | "
+                        f"zakres {min_p:.1f}–{max_p:.1f} MW"
+                    ),
+                    scene=dict(
+                        xaxis_title="X [m]", yaxis_title="Y [m]",
+                        zaxis_title="Moc (skala wizualna)",
+                        aspectmode="data",
+                        camera=dict(eye=dict(x=1.5, y=1.5, z=0.8)),
+                        zaxis=dict(showticklabels=False),
+                    ),
+                    height=720,
                     margin=dict(l=0, r=0, t=40, b=0),
                 )
 
