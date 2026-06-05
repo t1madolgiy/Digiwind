@@ -102,6 +102,119 @@ st.set_page_config(
 )
 
 # =====================================================================
+# GLOBALNY CSS — ograniczenie max-width (fix: wykresy nie rosną przy zoom-out)
+# =====================================================================
+st.markdown("""
+<style>
+    .block-container {
+        max-width: 1400px !important;
+        padding-left: 2rem !important;
+        padding-right: 2rem !important;
+    }
+    [data-testid="stImage"] img {
+        max-height: 700px;
+        object-fit: contain;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# =====================================================================
+# SPRAWDZENIE WYMAGANYCH BIBLIOTEK
+# =====================================================================
+def _check_dependencies():
+    import importlib
+    REQUIRED = {
+        "floris":      "floris>=4.4",
+        "numpy":       "numpy>=2.0",
+        "pandas":      "pandas>=2.0",
+        "scipy":       "scipy>=1.12",
+        "matplotlib":  "matplotlib>=3.8",
+        "streamlit":   "streamlit>=1.30",
+        "plotly":      "plotly>=5.18",
+        "reportlab":   "reportlab>=4.0",
+    }
+    OPTIONAL = {
+        "cdsapi":  "cdsapi>=0.7  (ERA5)",
+        "xarray":  "xarray>=2024.1  (ERA5)",
+        "netCDF4": "netcdf4>=1.6  (ERA5)",
+    }
+    missing = [pip for mod, pip in REQUIRED.items() if importlib.util.find_spec(mod) is None]
+    missing_opt = [pip for mod, pip in OPTIONAL.items() if importlib.util.find_spec(mod) is None]
+    if missing:
+        st.error(
+            "**Brakujące wymagane biblioteki — aplikacja nie uruchomi się poprawnie.**\n\n"
+            "Zainstaluj je poleceniem:\n"
+            "```\npip install " + " ".join(f'"{p}"' for p in missing) + "\n```"
+        )
+        st.stop()
+    if missing_opt:
+        st.warning(
+            "Brakujące biblioteki opcjonalne (potrzebne tylko do ERA5):\n"
+            "```\npip install " + " ".join(f'"{p}"' for p in missing_opt) + "\n```"
+        )
+
+_check_dependencies()
+
+# =====================================================================
+# FALLBACK BEZ PYARROW (komputery firmowe blokują DLL pyarrow przez WDAC/AppLocker)
+# =====================================================================
+# st.dataframe / st.table / st.data_editor pod spodem importują pyarrow. Gdy
+# polityka kontroli aplikacji blokuje jego DLL ("DLL load failed ... Zasady
+# kontroli aplikacji zablokowały ten plik"), te widgety się wywalają. Wykrywamy
+# to raz i podmieniamy renderowanie tabel na HTML, który pyarrow nie potrzebuje.
+try:
+    import pyarrow  # noqa: F401
+    PYARROW_OK = True
+except Exception:
+    PYARROW_OK = False
+
+if not PYARROW_OK:
+    st.session_state.setdefault("_pyarrow_warned", False)
+
+    _orig_dataframe = st.dataframe
+    _orig_table = st.table
+    _orig_data_editor = st.data_editor
+
+    def _df_to_html(data, hide_index=True, **_):
+        """Renderuje DataFrame jako HTML (bez pyarrow)."""
+        try:
+            df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+            html = df.to_html(index=not hide_index, escape=False, border=0)
+            st.markdown(
+                f'<div style="overflow-x:auto;max-height:420px">{html}</div>',
+                unsafe_allow_html=True,
+            )
+        except Exception as e:
+            st.text(f"[tabela] {e}\n{data}")
+
+    def _data_editor_fallback(data, *args, **kwargs):
+        """Zamiast interaktywnej tabeli — edytowalne pole CSV (bez pyarrow)."""
+        key = kwargs.get("key", "data_editor_fallback")
+        df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
+        st.caption("⚠️ Tryb awaryjny edytora (pyarrow zablokowany) — edytuj CSV i kliknij poza pole.")
+        txt = st.text_area(
+            "Dane (CSV)", value=df.to_csv(index=False),
+            key=f"{key}_csv", height=kwargs.get("height", 300),
+        )
+        try:
+            from io import StringIO
+            return pd.read_csv(StringIO(txt))
+        except Exception as e:
+            st.error(f"Błąd parsowania CSV: {e}")
+            return df
+
+    st.dataframe = _df_to_html
+    st.table = _df_to_html
+    st.data_editor = _data_editor_fallback
+
+    st.warning(
+        "⚠️ **`pyarrow` zablokowany przez politykę bezpieczeństwa tego komputera** "
+        "(WDAC/AppLocker). Tabele działają w trybie awaryjnym (HTML). "
+        "Aby przywrócić pełną funkcjonalność, poproś dział IT o odblokowanie "
+        "pyarrow albo zainstaluj Pythona poza folderem użytkownika."
+    )
+
+# =====================================================================
 # LOGOWANIE + ROLE (admin = wszystko, viewer = podstawowe zakładki)
 # =====================================================================
 # Konta: docelowo przenieś do .streamlit/secrets.toml. Tu domyślne dla wygody.
