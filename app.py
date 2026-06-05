@@ -3231,12 +3231,19 @@ with tab_3d:
                 R = (D / 2.0) * s
                 H = hh * s
 
-                # --- Pole prędkości na wysokości wirnika (z poprawką griddata) ---
+                # --- Pole prędkości wiatru ---
                 farm.fmodel.set(wind_directions=[ws_wd], wind_speeds=[ws_ws],
                                 turbulence_intensities=[0.06])
                 pad = 3 * D
                 xb = (float(x.min() - pad), float(x.max() + 8 * D))
                 yb = (float(y.min() - pad), float(y.max() + pad))
+
+                wd_rad = np.radians(270.0 - ws_wd)
+                px, py = -np.sin(wd_rad), np.cos(wd_rad)
+
+                fig3d = go.Figure()
+
+                # Pole prędkości jako pozioma płaszczyzna na wysokości wirnika (z=H).
                 hp = farm.fmodel.calculate_horizontal_plane(
                     height=hh, x_resolution=120, y_resolution=120,
                     x_bounds=xb, y_bounds=yb,
@@ -3250,13 +3257,6 @@ with tab_3d:
                 GX, GY = np.meshgrid(gx, gy)
                 Zspd = griddata(pts, vals, (GX, GY), method="linear")
                 Zspd = np.where(np.isnan(Zspd), griddata(pts, vals, (GX, GY), method="nearest"), Zspd)
-
-                wd_rad = np.radians(270.0 - ws_wd)
-                px, py = -np.sin(wd_rad), np.cos(wd_rad)
-
-                fig3d = go.Figure()
-
-                # Pole prędkości jako pozioma płaszczyzna na wysokości wirnika (z=H)
                 fig3d.add_trace(go.Surface(
                     x=gx, y=gy, z=np.full_like(GX, H),
                     surfacecolor=Zspd, colorscale="RdYlGn",
