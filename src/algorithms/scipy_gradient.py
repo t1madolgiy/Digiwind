@@ -54,14 +54,22 @@ class ScipyGradient(LayoutAlgorithm):
             final_aep = evaluate_aep(farm, opt_x, opt_y)
             elapsed = time.perf_counter() - t0
 
+            # Rzeczywista liczba wywołań funkcji celu (z gradientem liczonym
+            # różnicami skończonymi to ~2N × iteracje, nie maxiter).
+            rp = getattr(opt, "residual_plant", None)
+            nfev = int(getattr(rp, "nfev", maxiter))
+            nit = int(getattr(rp, "nit", -1))
+
             return AlgorithmResult(
                 name=self.name,
                 initial_x=init_x, initial_y=init_y, initial_aep=init_aep,
                 final_x=opt_x, final_y=opt_y, final_aep=final_aep,
                 elapsed_s=elapsed,
-                n_evaluations=maxiter,
+                n_evaluations=nfev,
                 history=[init_aep, final_aep],
-                extra={"maxiter": maxiter},
+                extra={"maxiter": maxiter, "nit": nit,
+                       "scipy_success": bool(getattr(rp, "success", False)),
+                       "scipy_message": str(getattr(rp, "message", ""))},
             )
         except Exception as e:
             elapsed = time.perf_counter() - t0

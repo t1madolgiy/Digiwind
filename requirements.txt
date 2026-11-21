@@ -3,7 +3,7 @@
 # pip install -r requirements.txt
 
 # Core
-floris>=4.4          # NREL FLORIS — wake modeling & optimization
+floris==4.6.4        # NREL FLORIS — wake modeling & optimization (przypięte: wyniki zależą od wersji)
 numpy>=2.0
 pandas>=2.0
 scipy>=1.12

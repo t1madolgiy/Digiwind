@@ -50,6 +50,8 @@ class ParticleSwarm(LayoutAlgorithm):
         init_x = farm.layout_x.copy()
         init_y = farm.layout_y.copy()
         init_aep = evaluate_aep(farm, init_x, init_y)
+        # stoper od razu: populacja startowa to tez ewaluacje z budzetu
+        t0 = time.perf_counter()
 
         rng = np.random.default_rng(seed)
 
@@ -82,7 +84,6 @@ class ParticleSwarm(LayoutAlgorithm):
         gbest_fit = float(pbest_fit[g_idx])
         history = [max(gbest_fit, init_aep)]
 
-        t0 = time.perf_counter()
         n_iters = max(1, (eval_budget - n_particles) // n_particles)
 
         for it in range(n_iters):

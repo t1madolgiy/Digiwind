@@ -104,43 +104,67 @@ class AEPCalculator:
     # ------------------------------------------------------------------
     # Analiza sezonowa
     # ------------------------------------------------------------------
+    def _period_energy(
+        self,
+        sub_loader: WindDataLoader,
+        fraction: float,
+        wd_step: float,
+        ws_step: float,
+    ) -> dict:
+        """Energia roczna wyprodukowana w danym okresie (miesiąc/sezon).
+
+        FLORIS liczy AEP z róży tak, jakby cały rok miał rozkład wiatru
+        danego okresu (= średnia moc okresu × 8760 h). Energia okresu to
+        ta wartość × udział okresu w danych (liczba rekordów okresu /
+        liczba wszystkich rekordów). Suma okresów = AEP roczne (błąd #2).
+        """
+        wr = sub_loader.to_wind_rose(wd_step=wd_step, ws_step=ws_step)
+        self.farm.fmodel.set(wind_data=wr)
+        self.farm.run()
+        annualized = self.farm.get_aep_gwh()
+        capacity_mw = self.farm.turbine_info["rated_power"] * self.farm.n_turbines
+        return {
+            "aep_gwh": annualized * fraction,
+            "mean_power_mw": annualized * 1e3 / 8760.0,
+            "capacity_factor_pct": annualized / (capacity_mw * 8.76) * 100,
+        }
+
     def compute_seasonal_aep(
         self,
         loader: WindDataLoader,
+        wd_step: float = 10.0,
+        ws_step: float = 2.0,
     ) -> pd.DataFrame:
-        """Oblicza AEP rozbite na sezony.
+        """Oblicza energię roczną rozbitą na sezony (suma sezonów = AEP).
 
         Wymaga WindDataLoader z timestampami.
 
         Args:
             loader: WindDataLoader z danymi wiatrowymi.
+            wd_step, ws_step: Rozdzielczość róży dla każdego sezonu.
 
         Returns:
-            DataFrame z AEP per sezon.
+            DataFrame: season, n_hours (liczba rekordów), fraction,
+            aep_gwh (energia sezonu w przeciętnym roku), mean_power_mw,
+            capacity_factor_pct, statystyki wiatru.
         """
         seasons = loader.seasonal_split()
+        n_total = len(loader.wind_speeds)
         results = []
 
         for season_name, season_loader in seasons.items():
-            # Przelicz na WindRose — zgrubnie (30°/3 m/s) dla szybkości
-            wr = season_loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
-
-            # Ustaw i oblicz
-            self.farm.fmodel.set(wind_data=wr)
-            self.farm.run()
-
-            n_hours = len(season_loader.wind_speeds)
-            aep_season = self.farm.get_aep_gwh()
-
-            # Przelicz na proporcję roku
-            fraction = n_hours / 8760.0
+            n_rec = len(season_loader.wind_speeds)
+            if n_rec == 0:
+                continue
+            fraction = n_rec / n_total
+            res = self._period_energy(season_loader, fraction, wd_step, ws_step)
             stats = season_loader.summary()
 
             results.append({
                 "season": season_name,
-                "n_hours": n_hours,
+                "n_hours": n_rec,
                 "fraction": fraction,
-                "aep_gwh": aep_season,
+                **res,
                 "mean_wind_speed_ms": stats["wind_speed"]["mean"],
                 "dominant_direction_deg": stats["wind_direction"]["dominant"],
                 "mean_ti": stats["turbulence_intensity"]["mean"],
@@ -158,24 +182,28 @@ class AEPCalculator:
     def compute_monthly_aep(
         self,
         loader: WindDataLoader,
+        wd_step: float = 10.0,
+        ws_step: float = 2.0,
     ) -> pd.DataFrame:
-        """Oblicza AEP rozbite na miesiące.
+        """Oblicza energię roczną rozbitą na miesiące (suma 12 miesięcy = AEP).
 
         Args:
             loader: WindDataLoader z timestampami.
+            wd_step, ws_step: Rozdzielczość róży dla każdego miesiąca.
 
         Returns:
-            DataFrame z AEP per miesiąc.
+            DataFrame z energią per miesiąc (GWh w przeciętnym roku).
         """
         if loader.timestamps is None:
             raise RuntimeError("Brak timestamps w WindDataLoader.")
 
-        months = loader.timestamps.month
+        months = np.asarray(loader.timestamps.month)
+        n_total = len(loader.wind_speeds)
         results = []
 
         for m in range(1, 13):
             mask = months == m
-            if mask.sum() < 24:  # min. 1 dzień danych
+            if mask.sum() == 0:
                 continue
 
             month_loader = WindDataLoader(
@@ -185,12 +213,8 @@ class AEPCalculator:
                 timestamps=loader.timestamps[mask],
             )
 
-            # Zgrubna róża (30°/3 m/s) — 12 przebiegów, więc liczy się szybko
-            wr = month_loader.to_wind_rose(wd_step=30.0, ws_step=3.0)
-            self.farm.fmodel.set(wind_data=wr)
-            self.farm.run()
-
-            aep = self.farm.get_aep_gwh()
+            res = self._period_energy(month_loader, mask.sum() / n_total, wd_step, ws_step)
+            aep = res["aep_gwh"]
             stats = month_loader.summary()
 
             month_names = [
@@ -202,7 +226,10 @@ class AEPCalculator:
                 "month": m,
                 "month_name": month_names[m],
                 "n_hours": int(mask.sum()),
+                "fraction": mask.sum() / n_total,
                 "aep_gwh": aep,
+                "mean_power_mw": res["mean_power_mw"],
+                "capacity_factor_pct": res["capacity_factor_pct"],
                 "mean_wind_speed_ms": stats["wind_speed"]["mean"],
                 "dominant_direction_deg": stats["wind_direction"]["dominant"],
             })
@@ -546,7 +573,7 @@ class AEPCalculator:
                     "period": f"month_{row['month']:02d}",
                     "period_label": row["month_name"],
                     "aep_gwh": row["aep_gwh"],
-                    "capacity_factor_pct": None,
+                    "capacity_factor_pct": row["capacity_factor_pct"],
                     "wake_losses_pct": None,
                     "n_turbines": summary["n_turbines"],
                     "turbine_type": summary["turbine"],
@@ -561,7 +588,7 @@ class AEPCalculator:
                     "period": f"season_{row['season'][:3]}",
                     "period_label": row["season"],
                     "aep_gwh": row["aep_gwh"],
-                    "capacity_factor_pct": None,
+                    "capacity_factor_pct": row["capacity_factor_pct"],
                     "wake_losses_pct": None,
                     "n_turbines": summary["n_turbines"],
                     "turbine_type": summary["turbine"],

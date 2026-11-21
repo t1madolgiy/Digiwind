@@ -668,18 +668,23 @@ class WindDataLoader:
         self,
         wd_step: float = 10.0,
         ws_step: float = 2.0,
-        ws_min: float = 3.0,
-        ws_max: float = 25.0,
+        ws_min: float = 0.0,
+        ws_max: Optional[float] = None,
     ) -> WindRose:
         """Konwertuje dane do FLORIS WindRose (binned).
 
         Tworzy róże wiatrów z tabel częstotliwości — optymalne do AEP.
 
+        Biny prędkości MUSZĄ obejmować cały zakres danych (od 0 m/s do
+        maksimum). FLORIS odrzuca rekordy spoza krawędzi binów i
+        renormalizuje częstości — przy dawnym zakresie 3–25 m/s godziny
+        < 3 m/s (moc 0) znikały, a AEP rósł o ~9% (błąd #1).
+
         Args:
             wd_step: Krok binowania kierunku [°].
             ws_step: Krok binowania prędkości [m/s].
-            ws_min: Minimalna prędkość w binach [m/s].
-            ws_max: Maksymalna prędkość w binach [m/s].
+            ws_min: Dolna krawędź binów [m/s] (domyślnie 0).
+            ws_max: Górna krawędź binów [m/s]; None = maksimum danych.
 
         Returns:
             floris.WindRose
@@ -689,9 +694,19 @@ class WindDataLoader:
         ts = self.to_time_series()
         wind_rose = ts.to_WindRose(
             wd_edges=np.arange(0, 360 + wd_step, wd_step),
-            ws_edges=np.arange(ws_min, ws_max + ws_step, ws_step),
+            ws_edges=self._ws_edges(ws_step, ws_min, ws_max),
         )
         return wind_rose
+
+    def _ws_edges(
+        self, ws_step: float, ws_min: float = 0.0, ws_max: Optional[float] = None
+    ) -> np.ndarray:
+        """Krawędzie binów prędkości pokrywające wszystkie dane."""
+        data_max = float(np.nanmax(self.wind_speeds))
+        if ws_max is None or ws_max <= data_max:
+            ws_max = data_max
+        n = int(np.floor((ws_max - ws_min) / ws_step)) + 1
+        return ws_min + ws_step * np.arange(n + 1)
 
     def to_wind_ti_rose(
         self,
@@ -715,10 +730,11 @@ class WindDataLoader:
         self._ensure_data_loaded()
 
         ts = self.to_time_series()
+        ti_max = max(0.20, float(np.nanmax(self.turbulence_intensities)))
         wind_ti_rose = ts.to_WindTIRose(
             wd_edges=np.arange(0, 360 + wd_step, wd_step),
-            ws_edges=np.arange(3.0, 25.0 + ws_step, ws_step),
-            ti_edges=np.arange(0.01, 0.20 + ti_step, ti_step),
+            ws_edges=self._ws_edges(ws_step),
+            ti_edges=np.arange(0.0, ti_max + 2 * ti_step, ti_step),
         )
         return wind_ti_rose
 

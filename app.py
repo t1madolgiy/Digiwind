@@ -44,6 +44,10 @@ from src.optimizer import Optimizer
 from src.aep_calculator import AEPCalculator
 from src.report_generator import ReportGenerator
 from src.algorithms import ALGORITHMS, bounds_from_layout
+from src.site_baltica2 import (
+    baltica2_site, rotated_grid_layout, layout_table, boundary_latlon,
+    BOUNDARY_SOURCE, DOMINANT_WD_DEG, PLACES, imgw_grid_points,
+)
 
 import floris
 from floris import TimeSeries
@@ -451,6 +455,22 @@ if wake_model not in WAKE_MODELS:
 # session_state widgetu po jego instancjonowaniu).
 if "_pending_layout" in st.session_state:
     st.session_state["cfg_layout"] = st.session_state.pop("_pending_layout")
+
+
+@st.cache_data(show_spinner=False)
+def _baltica2_baseline():
+    """Layout bazowy Baltica 2 (107 × IEA 15 MW, siatka obrócona do 260°)."""
+    _site = baltica2_site()
+    _x, _y, _info = rotated_grid_layout(_site, n_turbines=107, D=240.0)
+    return [float(v) for v in _x], [float(v) for v in _y], _info
+
+
+BALTICA2_LAYOUT = "Baltica 2 — baza (107 × IEA 15 MW)"
+if BALTICA2_LAYOUT not in st.session_state.setdefault("layout_lib", {}):
+    _bx, _by, _binfo = _baltica2_baseline()
+    st.session_state["layout_lib"][BALTICA2_LAYOUT] = {
+        "x": _bx, "y": _by, "site": "baltica2", "info": _binfo,
+    }
 layout_type = _cfg("cfg_layout", "grid")
 n_rows = int(_cfg("cfg_nrows", 5))
 n_cols = int(_cfg("cfg_ncols", 5))
@@ -1016,6 +1036,76 @@ with tab_layout:
     with cprev:
         st.pyplot(fig_act, use_container_width=True)
     plt.close()
+
+    # --- Mapa satelitarna (layouty Baltica 2 mają współrzędne geograficzne) ---
+    _act_lib = st.session_state.get("layout_lib", {}).get(_lt_sel, {})
+    if _act_lib.get("site") == "baltica2":
+        import plotly.graph_objects as go
+        st.subheader("🗺️ Mapa — MFW Baltica 2")
+        _site = baltica2_site()
+        _blat, _blon = boundary_latlon()
+        _tlat, _tlon = _site.local_to_latlon(farm.layout_x, farm.layout_y)
+        _inside = _site.contains(farm.layout_x, farm.layout_y)
+        _info = _act_lib.get("info", {})
+        _fig_map = go.Figure()
+        _b3lat, _b3lon = boundary_latlon("baltica3")
+        _fig_map.add_trace(go.Scattermap(
+            lat=_b3lat, lon=_b3lon, mode="lines", line=dict(color="#B0B0B0", width=2),
+            name="Baltica 3 (kontekst)", hoverinfo="skip",
+        ))
+        _fig_map.add_trace(go.Scattermap(
+            lat=_blat, lon=_blon, mode="lines", line=dict(color="#FFD23F", width=3),
+            name="Granica Baltica 2 (EIA)", hoverinfo="skip",
+        ))
+        _fig_map.add_trace(go.Scattermap(
+            lat=_tlat, lon=_tlon, mode="markers",
+            marker=dict(size=9, color=np.where(_inside, "#FFFFFF", "#FF3B3B")),
+            text=[f"T{i + 1}" for i in range(len(_tlat))],
+            hovertemplate="%{text}<br>%{lat:.5f}°N, %{lon:.5f}°E<extra></extra>",
+            name=f"Turbiny ({len(_tlat)})",
+        ))
+        _ipts = imgw_grid_points()
+        _fig_map.add_trace(go.Scattermap(
+            lat=_ipts.XLAT, lon=_ipts.XLONG, mode="markers+text",
+            marker=dict(size=8, color="#FF8C42"), text=_ipts.point_id,
+            textposition="top right", textfont=dict(color="#FFD8B8", size=11),
+            name="Punkty danych IMGW",
+        ))
+        _fig_map.add_trace(go.Scattermap(
+            lat=[v[0] for v in PLACES.values()], lon=[v[1] for v in PLACES.values()],
+            mode="markers+text", marker=dict(size=9, color="#E83F6F"),
+            text=list(PLACES.keys()), textposition="bottom right",
+            textfont=dict(color="white", size=13), name="Miejscowości",
+        ))
+        _fig_map.update_layout(
+            map=dict(
+                style="white-bg",
+                center=dict(lat=54.93, lon=17.15),
+                zoom=8.1,
+                layers=[dict(
+                    below="traces", sourcetype="raster",
+                    sourceattribution="Esri World Imagery",
+                    source=["https://server.arcgisonline.com/ArcGIS/rest/services/"
+                            "World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+                )],
+            ),
+            height=520, margin=dict(l=0, r=0, t=0, b=0),
+            legend=dict(bgcolor="rgba(255,255,255,0.8)", x=0.01, y=0.02, yanchor="bottom"),
+        )
+        st.plotly_chart(_fig_map, use_container_width=True)
+        _n_out = int((~_inside).sum())
+        st.caption(
+            f"Granica: {BOUNDARY_SOURCE}, pole {_site.area_km2:.0f} km². "
+            f"Siatka obrócona do dominującego kierunku {_info.get('wd_deg', DOMINANT_WD_DEG):.0f}° "
+            f"(IMGW 1991–2010, 150 m), rozstaw {_info.get('spacing_cross_D', 0):.2f}D × "
+            f"{_info.get('spacing_along_D', 0):.2f}D. "
+            + (f"⚠️ {_n_out} turbin poza granicą (czerwone)." if _n_out else "Wszystkie turbiny w granicy.")
+        )
+        st.download_button(
+            "⬇️ layout.csv (UTM 33N + lat/lon)",
+            layout_table(_site, farm.layout_x, farm.layout_y).to_csv(index=False).encode("utf-8"),
+            file_name="layout_baltica2.csv", mime="text/csv",
+        )
 
     st.divider()
     st.checkbox("✏️ Pokaż edytor layoutu (ręczna edycja + wczytanie CSV)", key="show_editor")
@@ -2200,6 +2290,7 @@ with tab_lab:
         results = st.session_state["lab_results"]
 
         # Tabela porównawcza
+        lab_farm_D = FarmModel(wake_model=wake_model, turbine=turbine_name).D
         table_data = []
         for r in results:
             table_data.append({
@@ -2210,13 +2301,23 @@ with tab_lab:
                 "Δ [%]": round(r.improvement_pct, 3),
                 "Czas [s]": round(r.elapsed_s, 2),
                 "Ewaluacje": r.n_evaluations,
+                "Min. odstęp [D]": (round(r.min_spacing_m / lab_farm_D, 2)
+                                    if getattr(r, "min_spacing_m", None) is not None else None),
+                "Ograniczenia OK": {True: "✅", False: "❌ łamie"}.get(getattr(r, "feasible", None), "—"),
                 "Błąd": (r.error or "")[:60],
             })
         df_lab = pd.DataFrame(table_data)
         st.subheader("📊 Tabela porównawcza")
         st.dataframe(df_lab, hide_index=True, use_container_width=True)
 
-        valid = [r for r in results if r.error is None and r.final_aep > 0]
+        infeasible = [r.name for r in results if getattr(r, "feasible", None) is False]
+        if infeasible:
+            st.warning(
+                "⚠️ Wynik łamie ograniczenia (odstęp/granice) — nie brany pod uwagę "
+                "w rankingu: " + ", ".join(infeasible)
+            )
+        valid = [r for r in results if r.error is None and r.final_aep > 0
+                 and getattr(r, "feasible", None) is not False]
         if valid:
             best = max(valid, key=lambda r: r.final_aep)
             fastest = min(valid, key=lambda r: r.elapsed_s)

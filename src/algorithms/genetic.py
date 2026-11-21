@@ -58,6 +58,8 @@ class GeneticAlgorithm(LayoutAlgorithm):
         init_x = farm.layout_x.copy()
         init_y = farm.layout_y.copy()
         init_aep = evaluate_aep(farm, init_x, init_y)
+        # stoper od razu: populacja startowa to tez ewaluacje z budzetu
+        t0 = time.perf_counter()
 
         x_min, y_min, x_max, y_max = bounds_rect
         rng = np.random.default_rng(seed)
@@ -83,7 +85,6 @@ class GeneticAlgorithm(LayoutAlgorithm):
         best_x, best_y = _decode(population[best_idx], n)
         history = [best_aep]
 
-        t0 = time.perf_counter()
 
         n_generations = max(1, (eval_budget - pop_size) // pop_size)
 
