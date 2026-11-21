@@ -1,0 +1,13 @@
+study,case,wake,ti,alpha,mean_ws,aep_gwh,capacity_factor_pct,wake_losses_pct,runtime_s
+points,"dookoła farmy (P47,P62,P63,P35)",gch,0.06,0.059,9.652,7442.974,52.938,10.037,29.778
+points,"południe/zachód (P47,P33,P20,P35)",gch,0.06,0.061,9.583,7350.583,52.281,10.271,29.634
+points,6 najbliższych,gch,0.06,0.058,9.646,7434.597,52.878,10.056,29.795
+wake_model,gch,gch,0.06,0.059,,7442.974,52.938,10.037,29.794
+wake_model,turbopark,turbopark,0.06,0.059,,6613.884,47.041,20.058,10.379
+wake_model,empirical_gauss,empirical_gauss,0.06,0.059,,7287.281,51.831,11.918,11.899
+ti,TI=0.04,gch,0.04,0.059,,7304.347,51.952,11.712,29.599
+ti,TI=0.06,gch,0.06,0.059,,7442.974,52.938,10.037,29.613
+ti,TI=0.08,gch,0.08,0.059,,7550.528,53.703,8.736,29.437
+ti,TI=0.1,gch,0.1,0.059,,7631.675,54.28,7.756,29.652
+alpha,z danych (0.059),gch,0.06,0.059,,7442.974,52.938,10.037,29.605
+alpha,domyślne FLORIS 0.12,gch,0.06,0.12,,7427.214,52.826,10.227,29.576
