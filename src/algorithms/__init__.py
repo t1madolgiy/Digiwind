@@ -18,9 +18,13 @@ from .simulated_annealing import SimulatedAnnealing
 from .pso import ParticleSwarm
 from .greedy import GreedyRelocate
 from .differential_evolution import DifferentialEvolution
+from .slsqp_parallel import SLSQPParallel
+from .hybrid import HybridGASLSQP
 
 ALGORITHMS: dict[str, type[LayoutAlgorithm]] = {
     "scipy": ScipyGradient,
+    "slsqp_par": SLSQPParallel,
+    "hybrid": HybridGASLSQP,
     "random_search": RandomSearch,
     "genetic": GeneticAlgorithm,
     "differential_evolution": DifferentialEvolution,
@@ -34,4 +38,5 @@ __all__ = [
     "Region", "is_feasible", "ALGORITHMS",
     "ScipyGradient", "RandomSearch", "GeneticAlgorithm", "DifferentialEvolution",
     "SimulatedAnnealing", "ParticleSwarm", "GreedyRelocate",
+    "SLSQPParallel", "HybridGASLSQP",
 ]
