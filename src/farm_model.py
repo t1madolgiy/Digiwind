@@ -393,6 +393,7 @@ class FarmModel:
         self._layout_y = np.array([0.0])
         self._layout_type = "single"
         self._wind_data = None
+        self._wind_shear = None  # None = domyślne FLORIS (0.12)
 
         # Buduj FlorisModel z odpowiednimi parametrami
         self._fmodel = self._build_floris_model(wake_model, turbine)
@@ -500,6 +501,10 @@ class FarmModel:
 
         # Ustaw reference_wind_height na hub height turbiny
         input_dict["flow_field"]["reference_wind_height"] = t_info["hub_height"]
+        # Wykładnik profilu potęgowego (z danych, np. IMGW) — zachowany przy
+        # przełączaniu modelu wake / turbiny
+        if getattr(self, "_wind_shear", None) is not None:
+            input_dict["flow_field"]["wind_shear"] = float(self._wind_shear)
 
         # Floating — dodaj multidim_conditions (parametry fal)
         if turbine in FLOATING_TURBINES or t_info.get("floating", False):
@@ -808,6 +813,15 @@ class FarmModel:
     # ------------------------------------------------------------------
     # Dane wiatrowe
     # ------------------------------------------------------------------
+    def set_wind_shear(self, alpha: float) -> None:
+        """Ustawia wykładnik profilu wiatru (flow_field.wind_shear).
+
+        Wpływa na rozkład prędkości na wirniku (łopaty ok. 30–270 m);
+        prędkość na wysokości piasty pozostaje bez zmian.
+        """
+        self._wind_shear = float(alpha)
+        self._fmodel.set(wind_shear=self._wind_shear)
+
     def set_wind_data(self, wind_data: Union[WindRose, TimeSeries]) -> None:
         """Ustawia dane wiatrowe w modelu.
 

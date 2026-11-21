@@ -637,6 +637,97 @@ class WindDataLoader:
         })
 
     # ------------------------------------------------------------------
+    # IMGW (model WRF + korekta MBCn) — dane od Tematu 1
+    # ------------------------------------------------------------------
+    IMGW_DEFAULT_FILE = (
+        Path(__file__).resolve().parent.parent
+        / "data" / "processed" / "imgw_baltica2_150m_1991_2010.csv.gz"
+    )
+
+    @classmethod
+    def from_imgw(
+        cls,
+        points: tuple[str, ...] = ("P47", "P62", "P63", "P35"),
+        path: Optional[Union[str, Path]] = None,
+        weighting: str = "idw",
+        ti: float = 0.06,
+    ) -> "WindDataLoader":
+        """Wiatr na 150 m (wys. piasty) z danych IMGW, okres 1991–2010.
+
+        Żaden punkt siatki IMGW nie leży w Baltica 2, więc łączymy kilka
+        najbliższych: średnia ważona składowych u, v (NIE kierunków), wagi
+        1/d² od środka farmy ("idw") albo równe ("equal").
+
+        Args:
+            points: id punktów siatki IMGW (P00–P83).
+            path: plik z data/processed (domyślnie wycinek 11 punktów).
+            weighting: "idw" lub "equal".
+            ti: stała intensywność turbulencji (brak TI w danych).
+
+        Returns:
+            WindDataLoader z timestamps (krok 3 h). Dodatkowo:
+            .wind_shear — mediana wykładnika α (do flow_field.wind_shear),
+            .source_info — punkty, wagi, okres.
+        """
+        from .site_baltica2 import baltica2_site
+
+        path = Path(path) if path else cls.IMGW_DEFAULT_FILE
+        df = pd.read_csv(path)
+        missing = sorted(set(points) - set(df.point_id))
+        if missing:
+            raise ValueError(f"Brak punktów {missing} w {path.name}")
+        df = df[df.point_id.isin(points)]
+
+        meta = df.drop_duplicates("point_id").set_index("point_id").loc[list(points)]
+        site = baltica2_site()
+        c = site.polygon.centroid
+        px, py = site.latlon_to_local(meta.lat.values, meta.lon.values)
+        dist_km = np.hypot(px - c.x, py - c.y) / 1000.0
+        if weighting == "idw":
+            w = 1.0 / dist_km ** 2
+        elif weighting == "equal":
+            w = np.ones(len(points))
+        else:
+            raise ValueError("weighting: 'idw' albo 'equal'")
+        w = w / w.sum()
+        wmap = dict(zip(points, w))
+
+        U = df.pivot(index="time", columns="point_id", values="u")[list(points)]
+        V = df.pivot(index="time", columns="point_id", values="v")[list(points)]
+        A = df.pivot(index="time", columns="point_id", values="alpha")[list(points)]
+        u = U.values @ w
+        v = V.values @ w
+        ws = np.hypot(u, v)
+        # kierunek meteorologiczny "skąd wieje"
+        wd = (np.degrees(np.arctan2(-u, -v)) + 360.0) % 360.0
+        alpha = A.values @ w
+
+        # Kalendarz noleap: brak 29.02 — zwykłe daty są poprawne, po prostu
+        # w latach przestępnych brakuje jednego dnia.
+        ts = pd.DatetimeIndex(pd.to_datetime(U.index))
+
+        loader = cls(
+            wind_speeds=ws,
+            wind_directions=wd,
+            turbulence_intensities=np.full(len(ws), float(ti)),
+            timestamps=ts,
+        )
+        loader.wind_shear = float(np.median(alpha))
+        loader.source_info = {
+            "source": "IMGW (WRF + MBCn), historical",
+            "height_m": 150,
+            "period": f"{ts.min():%Y-%m-%d} – {ts.max():%Y-%m-%d}",
+            "step_h": 3,
+            "points": list(points),
+            "weights": {p: round(float(wmap[p]), 3) for p in points},
+            "dist_km": {p: round(float(d), 1) for p, d in zip(points, dist_km)},
+            "weighting": weighting,
+            "ti": ti,
+        }
+        logger.info(f"IMGW: {len(ws)} rekordów, punkty {list(points)}, α={loader.wind_shear:.3f}")
+        return loader
+
+    # ------------------------------------------------------------------
     # Konwersja do obiektów FLORIS
     # ------------------------------------------------------------------
     def to_time_series(
