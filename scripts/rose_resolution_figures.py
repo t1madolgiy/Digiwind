@@ -12,8 +12,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-INK, BODY, MUTED, GRID = "#14213D", "#3F4B5C", "#6B7785", "#DDE4E8"
-TEAL, TEAL_DARK, ORANGE = "#2A9DA8", "#136F86", "#D9822B"
+INK, BODY, MUTED, GRID = "#1A1A1A", "#333333", "#777777", "#E2E2E2"
+TEAL, TEAL_DARK, ORANGE = "#2B5C8A", "#1B3F63", "#E07B24"   # niebieski / ciemny niebieski / pomarańczowy
 plt.rcParams.update({"font.family": "DejaVu Sans", "text.color": INK, "axes.labelcolor": BODY,
                      "xtick.color": MUTED, "ytick.color": MUTED})
 

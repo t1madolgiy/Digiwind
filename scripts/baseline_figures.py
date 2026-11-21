@@ -24,9 +24,9 @@ from src.wind_data import WindDataLoader
 from src.farm_model import FarmModel
 from src.site_baltica2 import baltica2_site, rotated_grid_layout
 
-INK, BODY, MUTED, GRID = "#14213D", "#3F4B5C", "#6B7785", "#DDE4E8"
-TEAL, TEAL_DARK = "#2A9DA8", "#136F86"
-SEQ = LinearSegmentedColormap.from_list("seq", ["#E3F3F4", "#7CCBD0", "#2A9DA8", "#136F86", "#0E3F57"])
+INK, BODY, MUTED, GRID = "#1A1A1A", "#333333", "#777777", "#E2E2E2"
+TEAL, TEAL_DARK = "#2B5C8A", "#1B3F63"   # (nazwy historyczne) niebieski główny / ciemny
+SEQ = LinearSegmentedColormap.from_list("seq", ["#E3EAF2", "#9DB7D3", "#5584B3", "#2B5C8A", "#132F4C"])
 plt.rcParams.update({"font.family": "DejaVu Sans", "text.color": INK, "axes.labelcolor": BODY,
                      "xtick.color": MUTED, "ytick.color": MUTED, "axes.edgecolor": GRID})
 
@@ -65,7 +65,7 @@ def turbine_losses(L, site, x, y, out):
     px, py = site.polygon.exterior.xy
     k = 1e-3
     fig, ax = plt.subplots(figsize=(10, 6.6), dpi=300)
-    ax.fill(np.array(px) * k, np.array(py) * k, color="#F3F6F7", zorder=1)
+    ax.fill(np.array(px) * k, np.array(py) * k, color="#F4F6F9", zorder=1)
     ax.plot(np.array(px) * k, np.array(py) * k, color=TEAL_DARK, lw=1.4, zorder=2)
     sc = ax.scatter(x * k, y * k, c=loss, cmap=SEQ, s=70, edgecolors="white", linewidths=1.2, zorder=3,
                     vmin=0, vmax=np.ceil(loss.max()))
