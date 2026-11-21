@@ -8,7 +8,8 @@ from __future__ import annotations
 import time
 import numpy as np
 
-from .base import LayoutAlgorithm, AlgorithmResult, evaluate_aep
+from .base import (LayoutAlgorithm, AlgorithmResult, evaluate_aep, Region,
+                   is_feasible, repair_min_dist)
 
 
 class ScipyGradient(LayoutAlgorithm):
@@ -38,7 +39,11 @@ class ScipyGradient(LayoutAlgorithm):
         init_aep = evaluate_aep(farm, init_x, init_y)
 
         x_min, y_min, x_max, y_max = bounds_rect
-        boundaries = [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)]
+        if isinstance(bounds_rect, Region):
+            # FLORIS obsługuje dowolny wielokąt (ograniczenie odległości od brzegu)
+            boundaries = [tuple(p) for p in list(bounds_rect.polygon.exterior.coords)[:-1]]
+        else:
+            boundaries = [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)]
 
         t0 = time.perf_counter()
         try:
@@ -51,6 +56,11 @@ class ScipyGradient(LayoutAlgorithm):
             sol = opt.optimize()
             opt_x = np.array(sol[0])
             opt_y = np.array(sol[1])
+            # SLSQP spełnia ograniczenia dopiero po zbiegnięciu; przy małym
+            # maxiter wynik bywa poza granicą lub za ciasny → naprawa na końcu
+            raw_feasible = is_feasible(opt_x, opt_y, bounds_rect, min_dist)
+            if not raw_feasible:
+                opt_x, opt_y = repair_min_dist(opt_x, opt_y, min_dist, bounds_rect, max_passes=50)
             final_aep = evaluate_aep(farm, opt_x, opt_y)
             elapsed = time.perf_counter() - t0
 
@@ -67,7 +77,7 @@ class ScipyGradient(LayoutAlgorithm):
                 elapsed_s=elapsed,
                 n_evaluations=nfev,
                 history=[init_aep, final_aep],
-                extra={"maxiter": maxiter, "nit": nit,
+                extra={"maxiter": maxiter, "nit": nit, "repaired_after_slsqp": not raw_feasible,
                        "scipy_success": bool(getattr(rp, "success", False)),
                        "scipy_message": str(getattr(rp, "message", ""))},
             )

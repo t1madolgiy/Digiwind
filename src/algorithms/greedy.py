@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 import numpy as np
 
-from .base import LayoutAlgorithm, AlgorithmResult, evaluate_aep, repair_min_dist
+from .base import LayoutAlgorithm, AlgorithmResult, evaluate_aep, repair_min_dist, is_feasible
 
 
 class GreedyRelocate(LayoutAlgorithm):
@@ -60,7 +60,9 @@ class GreedyRelocate(LayoutAlgorithm):
         for pass_idx in range(n_passes):
             improved = False
             for i in rng.permutation(n):
-                best_x_i, best_y_i = cur_x[i], cur_y[i]
+                # repair może przesunąć też sąsiadów — zapamiętujemy CAŁY układ,
+                # nie tylko turbinę i (inaczej sąsiedzi wracali i łamali odstęp)
+                best_x, best_y = cur_x, cur_y
                 best_local_aep = cur_aep
 
                 for _ in range(n_trials_per_turbine):
@@ -73,17 +75,17 @@ class GreedyRelocate(LayoutAlgorithm):
                     cand_x[i] = float(np.clip(cand_x[i], x_min, x_max))
                     cand_y[i] = float(np.clip(cand_y[i], y_min, y_max))
                     cand_x, cand_y = repair_min_dist(cand_x, cand_y, min_dist, bounds_rect, max_passes=3)
+                    if not is_feasible(cand_x, cand_y, bounds_rect, min_dist):
+                        continue  # ruch łamie ograniczenia — bez ewaluacji
                     aep = evaluate_aep(farm, cand_x, cand_y)
                     n_evals += 1
 
                     if aep > best_local_aep:
                         best_local_aep = aep
-                        best_x_i = cand_x[i]
-                        best_y_i = cand_y[i]
+                        best_x, best_y = cand_x, cand_y
                         improved = True
 
-                cur_x[i] = best_x_i
-                cur_y[i] = best_y_i
+                cur_x, cur_y = best_x.copy(), best_y.copy()
                 cur_aep = best_local_aep
                 history.append(cur_aep)
 

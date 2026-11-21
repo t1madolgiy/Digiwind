@@ -120,13 +120,72 @@ def evaluate_aep(farm, x: np.ndarray, y: np.ndarray) -> float:
         return 0.0
 
 
+class Region(tuple):
+    """Obszar dozwolony dla turbin: wielokąt (shapely) udający prostokąt.
+
+    Zachowuje się jak krotka (x_min, y_min, x_max, y_max) — obwiednia
+    wielokąta — więc wszystkie algorytmy działają bez zmian. Funkcje
+    pomocnicze (repair_min_dist, random_feasible_layout, is_feasible)
+    rozpoznają Region i dodatkowo pilnują samego wielokąta.
+
+    Użycie:
+        >>> region = Region(site.polygon)               # granica Baltica 2
+        >>> algo.run(farm, region, min_dist, budget)
+    """
+
+    def __new__(cls, polygon, margin: float = 0.0):
+        poly = polygon.buffer(-margin) if margin > 0 else polygon
+        obj = tuple.__new__(cls, tuple(float(v) for v in poly.bounds))
+        obj.polygon = poly
+        # wielokąt lekko zwężony — punkty rzutowane na brzeg lądują w środku
+        obj._inner = poly.buffer(-1.0)
+        return obj
+
+    def __reduce__(self):  # pickle (multiprocessing)
+        return (Region, (self.polygon,))
+
+    def contains(self, x, y, tol: float = 1e-3) -> np.ndarray:
+        from shapely import contains_xy, distance, points
+        x = np.asarray(x, float); y = np.asarray(y, float)
+        inside = contains_xy(self.polygon, x, y)
+        if not inside.all():
+            out = ~inside
+            inside[out] = distance(self.polygon, points(x[out], y[out])) <= tol
+        return inside
+
+    def project(self, x, y) -> tuple[np.ndarray, np.ndarray]:
+        """Punkty poza wielokątem przesuwa na najbliższy punkt brzegu (do środka)."""
+        from shapely import contains_xy, points, line_locate_point, line_interpolate_point, get_coordinates
+        x = np.asarray(x, float).copy(); y = np.asarray(y, float).copy()
+        out = ~contains_xy(self.polygon, x, y)
+        if out.any():
+            ring = self._inner.exterior if not self._inner.is_empty else self.polygon.exterior
+            pts = points(x[out], y[out])
+            proj = line_interpolate_point(ring, line_locate_point(ring, pts))
+            xy = get_coordinates(proj)
+            x[out], y[out] = xy[:, 0], xy[:, 1]
+        return x, y
+
+
+def clip_to_region(x, y, bounds_rect) -> tuple[np.ndarray, np.ndarray]:
+    """Przycina do prostokąta; dla Region dodatkowo rzutuje do wielokąta."""
+    x = np.asarray(x, float).copy(); y = np.asarray(y, float).copy()
+    x_min, y_min, x_max, y_max = bounds_rect
+    np.clip(x, x_min, x_max, out=x)
+    np.clip(y, y_min, y_max, out=y)
+    if isinstance(bounds_rect, Region):
+        x, y = bounds_rect.project(x, y)
+    return x, y
+
+
 def is_feasible(
     x: np.ndarray,
     y: np.ndarray,
     bounds_rect: tuple[float, float, float, float],
     min_dist: float,
 ) -> bool:
-    """Sprawdza czy layout mieści się w boundaries i spełnia min_dist."""
+    """Sprawdza czy layout mieści się w boundaries i spełnia min_dist.
+    Dla Region sprawdza przynależność do wielokąta."""
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
     tol = 1e-6 * max(1.0, min_dist)
@@ -134,6 +193,8 @@ def is_feasible(
     if np.any(x < x_min - tol) or np.any(x > x_max + tol):
         return False
     if np.any(y < y_min - tol) or np.any(y > y_max + tol):
+        return False
+    if isinstance(bounds_rect, Region) and not bounds_rect.contains(x, y).all():
         return False
     if len(x) > 1:
         if pdist(np.column_stack([x, y])).min() < min_dist - tol:
@@ -169,10 +230,8 @@ def repair_min_dist(
     łączącego, potem przytnij do boundaries. Może nie zbiec dla bardzo
     ciasnych boundaries, ale dla 3x3/4x4 z marginesem wystarcza.
     """
-    x = np.asarray(x, dtype=float).copy()
-    y = np.asarray(y, dtype=float).copy()
+    x, y = clip_to_region(x, y, bounds_rect)
     n = len(x)
-    x_min, y_min, x_max, y_max = bounds_rect
 
     for _ in range(max_passes):
         moved = False
@@ -193,9 +252,8 @@ def repair_min_dist(
                     # nakładające się — pchnij losowo
                     x[j] += min_dist
                     moved = True
-        # boundaries
-        np.clip(x, x_min, x_max, out=x)
-        np.clip(y, y_min, y_max, out=y)
+        # boundaries (prostokąt albo wielokąt Region)
+        x, y = clip_to_region(x, y, bounds_rect)
         if not moved:
             break
 
@@ -239,6 +297,10 @@ def random_feasible_layout(
             cand = np.column_stack([
                 rng.uniform(x_min, x_max, 50), rng.uniform(y_min, y_max, 50)
             ])
+            if isinstance(bounds_rect, Region):
+                cand = cand[bounds_rect.contains(cand[:, 0], cand[:, 1])]
+                if not len(cand):
+                    continue
             if len(pts):
                 d2 = ((cand[:, None, :] - pts[None, :, :]) ** 2).sum(-1).min(1)
                 ok = np.flatnonzero(d2 >= md2)
@@ -255,6 +317,8 @@ def random_feasible_layout(
         # Uzupełnij: punkt z siatki kandydatów najdalszy od istniejących
         gx, gy = np.meshgrid(np.linspace(x_min, x_max, 60), np.linspace(y_min, y_max, 60))
         grid = np.column_stack([gx.ravel(), gy.ravel()])
+        if isinstance(bounds_rect, Region):
+            grid = grid[bounds_rect.contains(grid[:, 0], grid[:, 1])]
         while len(pts) < n:
             if len(pts):
                 d2 = ((grid[:, None, :] - pts[None, :, :]) ** 2).sum(-1).min(1)

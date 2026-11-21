@@ -9,7 +9,8 @@ Aby dodać nowy algorytm:
 
 Zakładka "🧪 Lab algorytmów" automatycznie pokaże nowy algorytm.
 """
-from .base import LayoutAlgorithm, AlgorithmResult, evaluate_aep, bounds_from_layout
+from .base import (LayoutAlgorithm, AlgorithmResult, evaluate_aep, bounds_from_layout,
+                   Region, is_feasible)
 from .scipy_gradient import ScipyGradient
 from .random_search import RandomSearch
 from .genetic import GeneticAlgorithm
@@ -30,7 +31,7 @@ ALGORITHMS: dict[str, type[LayoutAlgorithm]] = {
 
 __all__ = [
     "LayoutAlgorithm", "AlgorithmResult", "evaluate_aep", "bounds_from_layout",
-    "ALGORITHMS",
+    "Region", "is_feasible", "ALGORITHMS",
     "ScipyGradient", "RandomSearch", "GeneticAlgorithm", "DifferentialEvolution",
     "SimulatedAnnealing", "ParticleSwarm", "GreedyRelocate",
 ]
