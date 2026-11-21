@@ -134,7 +134,9 @@ class GeneticAlgorithm(LayoutAlgorithm):
             history.append(best_aep)
 
         elapsed = time.perf_counter() - t0
-        evaluate_aep(farm, best_x, best_y)
+        # Pozostaw farmę z najlepszym znalezionym layoutem — bez dodatkowego
+        # uruchomienia symulacji (które było tylko side-effectem).
+        farm.set_layout_custom(best_x, best_y, name="_ga_best")
 
         return AlgorithmResult(
             name=self.name,

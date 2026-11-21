@@ -855,16 +855,21 @@ class FarmModel:
         # Cache key — MUSI zależeć od layoutu i danych wiatrowych, bo farma jest
         # współdzielona (cache_resource) i eval_wind się zmienia. Bez tego zwracano
         # nieaktualne straty wake po zmianie wiatru/layoutu.
+        # Używamy hasha bajtów tablic — sumy współrzędnych dawały kolizje dla
+        # różnych layoutów o tej samej sumie (np. symetrycznych).
+        def _arr_sig(a) -> str:
+            arr = np.ascontiguousarray(np.asarray(a, dtype=np.float64))
+            return f"{hash(arr.tobytes())}_{arr.size}"
+
         try:
             wd = self._wind_data
             wind_sig = (
-                f"{float(np.sum(np.asarray(wd.wind_directions))):.2f}_"
-                f"{float(np.sum(np.asarray(wd.wind_speeds))):.2f}_"
-                f"{len(np.atleast_1d(wd.wind_directions))}"
+                f"{_arr_sig(wd.wind_directions)}_"
+                f"{_arr_sig(wd.wind_speeds)}"
             )
         except Exception:
             wind_sig = str(id(self._wind_data))
-        layout_sig = f"{float(np.sum(self._layout_x)):.1f}_{float(np.sum(self._layout_y)):.1f}"
+        layout_sig = f"{_arr_sig(self._layout_x)}_{_arr_sig(self._layout_y)}"
         cache_key = (
             f"{self.wake_model_name}_{self.turbine_name}_{self.n_turbines}_"
             f"{layout_sig}_{wind_sig}"
@@ -1291,6 +1296,9 @@ class FarmModel:
             turbines = list(TURBINE_LIBRARY.keys())
 
         original_turbine = self.turbine_name
+        original_layout_x = self._layout_x.copy()
+        original_layout_y = self._layout_y.copy()
+        original_layout_type = self._layout_type
         results = {}
 
         for turbine_name in turbines:
@@ -1317,9 +1325,12 @@ class FarmModel:
                 logger.warning(f"Błąd dla {turbine_name}: {e}")
                 results[turbine_name] = {"error": str(e)}
 
-        # Przywróć oryginalną turbinę
+        # Przywróć oryginalną turbinę ORAZ oryginalny layout (a nie grid z argumentów,
+        # który nadpisywałby np. staggered/circular/custom layout użytkownika).
         self.switch_turbine(original_turbine)
-        self.set_layout_grid(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing_D)
+        self.set_layout_custom(original_layout_x, original_layout_y, name=original_layout_type)
+        if self._wind_data is not None:
+            self._fmodel.set(wind_data=self._wind_data)
 
         return results
 
@@ -1342,16 +1353,28 @@ class FarmModel:
         if spacings_D is None:
             spacings_D = np.arange(4.0, 12.5, 0.5)
 
+        # Zapamiętaj oryginalny layout, żeby go przywrócić po sweepie
+        # (bez tego farma zostawała z gridem ostatniego spacing'a).
+        orig_layout_x = self._layout_x.copy()
+        orig_layout_y = self._layout_y.copy()
+        orig_layout_type = self._layout_type
+
         aep_values = []
         wake_losses = []
 
-        for spacing in spacings_D:
-            self.set_layout_grid(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing)
+        try:
+            for spacing in spacings_D:
+                self.set_layout_grid(n_rows=n_rows, n_cols=n_cols, spacing_D=spacing)
+                if self._wind_data is not None:
+                    self._fmodel.set(wind_data=self._wind_data)
+                self.run()
+                aep_values.append(self.get_aep_gwh())
+                wake_losses.append(self.get_wake_losses_percent())
+        finally:
+            # Przywróć oryginalny layout nawet jeśli któryś spacing rzucił wyjątek.
+            self.set_layout_custom(orig_layout_x, orig_layout_y, name=orig_layout_type)
             if self._wind_data is not None:
                 self._fmodel.set(wind_data=self._wind_data)
-            self.run()
-            aep_values.append(self.get_aep_gwh())
-            wake_losses.append(self.get_wake_losses_percent())
 
         return {
             "spacings_D": spacings_D,
