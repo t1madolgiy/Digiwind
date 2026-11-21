@@ -1,0 +1,740 @@
+Farm Location & Layout, FLORIS, Baltica 2. Stan na 21.11.2026. Autor:
+Tsimafei Dalhou (Tima).
+
+Źródła: czaty projektu SREE WINDFARM (04–11.2026), dokument „DigiWind
+Task 2 — przegląd kodu i plan działań” (26.10.2026), repo
+github.com/t1madolgiy/Digiwind (branch Ver3_Gr2+3, commit 79ae3e3,
+05.06.2026). Błędy z sekcji 6 sprawdzone ponownie na tym commicie
+21.11.2026 (FLORIS 4.6.4, dane mock). Czerwone punkty = nie ustalono w
+żadnym źródle.
+
+1. Decyzje
+
++----------------+----------------------------+------------------------+
+| Parametr       | Ustalenie                  | Uwagi / historia       |
++================+============================+========================+
+| Turbina        | IEA-15-240-RWT (iea_15MW z | Maj 2026: SG 14-222 DD |
+|                | biblioteki FLORIS), 15 MW, | (custom YAML).         |
+|                | D = 240 m                  | Czerwiec: cała grupa   |
+|                |                            | (T4, T6) na IEA 15 MW. |
+|                |                            | Kick-off 26.10:        |
+|                |                            | „mówimy jednoznacznie  |
+|                |                            | IEA 15 MW”.            |
++----------------+----------------------------+------------------------+
+| Liczba turbin  | 107 (jak realna Baltica 2) | Moc farmy 107 × 15 =   |
+|                |                            | 1605 MW (nie 1,5 GW —  |
+|                |                            | to liczba dla 14 MW).  |
+|                |                            | Kwiecień: 25 baseline  |
+|                |                            | / 100 stretch —        |
+|                |                            | nieaktualne.           |
++----------------+----------------------------+------------------------+
+| Wysokość       | 150 m                      | IMGW ma poziom 150 m — |
+| piasty         |                            | bez ekstrapolacji.     |
++----------------+----------------------------+------------------------+
+| Lokalizacja    | MFW Baltica 2 (PGE +       | Kod ma domyślnie       |
+|                | Ørsted), ~40 km od Ustki,  | 54,5°N 16,5°E          |
+|                | ~190 km², głęb. 25–40 m,   | (from_era5, app.py) —  |
+|                | środek ok. 55°04′N 17°06′E | to przy brzegu koło    |
+|                |                            | Darłowa, błędne.       |
++----------------+----------------------------+------------------------+
+| Granica        | Tylko prostokąt z Raportu  | W prezentacjach w      |
+|                | OOŚ MFW Baltica, tabela 7, | zaokrągleniu           |
+|                | str. 45:                   | 55°00′–55°07′N,        |
+|                |                            | 17°02′–17°27′E.        |
+|                | szer. 55°00′07,509″ –      | Dokładnych punktów     |
+|                | 55°06′51,280″ N            | wielokąta nie było w   |
+|                |                            | żadnym czacie.         |
+|                | dł. 17°01′50,132″ –        |                        |
+|                | 17°27′20,251″ E            |                        |
++----------------+----------------------------+------------------------+
+| Model wake     | Domyślnie w kodzie GCH     | Wybór końcowy nie      |
+|                |                            | zapadł. Plan M1:       |
+|                |                            | porównać GCH vs        |
+|                |                            | TurbOPark vs Empirical |
+|                |                            | Gauss.                 |
++----------------+----------------------------+------------------------+
+| Min. rozstaw   | —                          | Lab algorytmów używa   |
+|                |                            | 3D (za mało dla IEA 15 |
+|                |                            | MW). Kwiecień: 7D–10D  |
+|                |                            | jako standard offshore |
+|                |                            | dla siatki; bazowe     |
+|                |                            | siatki w testach 7D.   |
++----------------+----------------------------+------------------------+
+| Róża wiatrów   | Dwie rozdzielczości:       | Lekcja z maja: SLSQP   |
+|                | optymalizacja 30° × 3 m/s, | na 30°×3 m/s dał       |
+|                | ocena końcowa 10° × 2 m/s  | +3,69%, na 10°×2 m/s   |
+|                |                            | ten sam layout −1,3%.  |
+|                |                            | Biny prędkości muszą   |
+|                |                            | zaczynać się od 0 m/s  |
+|                |                            | (błąd #1). App ma też  |
+|                |                            | 5° × 1 m/s.            |
++----------------+----------------------------+------------------------+
+| TI             | Plan: stałe 0,06 +         | Plan z czatów,         |
+|                | wrażliwość 0,04 / 0,06 /   | prowadzący tego nie    |
+|                | 0,08 / 0,10                | zatwierdzali. Obecny   |
+|                |                            | wzór w kodzie 0.12 ×   |
+|                |                            | ws10/ws100 do          |
+|                |                            | usunięcia.             |
++----------------+----------------------------+------------------------+
+| Narzędzia      | FLORIS 4.6.4, Python 3.11, | requirements.txt ma    |
+|                | conda env windfarm,        | floris>=4.4 — przypiąć |
+|                | Streamlit                  | ==4.6.4.               |
++----------------+----------------------------+------------------------+
+
+Druga pozycja „sub-region extraction” z tabeli Timy (Dziennik Urzędowy
+Woj. Pomorskiego 2025/1786): 54°49′26,11″N 017°51′07,63″E oraz
+54°49′46,62″N 017°51′04,38″E. To dwa punkty przy ~17°51′E, poza
+prostokątem Baltica 2 — nie wiadomo, czego dotyczą. Nie używać bez
+sprawdzenia.
+
+-   NIE USTALONO: dokładny wielokąt Baltica 2 i strefy wyłączone (do
+    zdobycia z Raportu OOŚ lub od prowadzących).
+
+-   NIE USTALONO: czy liczba turbin jest stała (107), czy
+    optymalizowana.
+
+-   NIE USTALONO: minimalny rozstaw dla Baltica 2.
+
+-   NIE USTALONO: końcowy model wake.
+
+-   NIE USTALONO: układ współrzędnych — w planie UTM 33N (EPSG:32633),
+    na razie lokalne metry bez CRS.
+
+2. Dane wiatrowe
+
+2.1 Co uzgodniono
+
+-   Od 01.11.2026 źródłem są dane IMGW. ERA5 zostaje tylko do testów.
+
+-   Plik „IMGW_positive_version” nie pojawia się w żadnym czacie.
+    Którego z 4 plików IMGW używamy — nie ustalono.
+
+2.2 IMGW — co wiadomo (z PDF opisowego Pdst_info.pdf, czat „Dane ERA 5 i IMGW”)
+
+  -----------------------------------------------------------------------
+  Cecha               Wartość
+  ------------------- ---------------------------------------------------
+  Pochodzenie         Wynik modelu WRF (nazwy XLAT/XLONG), poprawiony
+                      bias-adjustment metodą MBCn. To nie są pomiary.
+
+  Okres               1991–2010
+
+  Krok czasowy        3 h; 58 400 rekordów w każdym pliku (20 lat × 365
+                      dni × 8)
+
+  Kalendarz / data    Kalendarz noleap (bez 29 lutego). pd.to_datetime
+                      się wyłoży — konwersja przez cftime. Dokładny
+                      format zapisu daty: nie ustalono.
+
+  Wysokości           50, 100, 150, 200, 250, 300 m
+
+  Siatka              6 × 14 = 84 punkty, ok. 54,75–55,31°N, 15,9–18,4°E.
+                      Indeksy south_north, west_east (wiersz/kolumna
+                      siatki WRF — notatka „south east” to te indeksy,
+                      nie kierunek wiatru).
+
+  Zmienne             u, v, ws, wdir. Brak TI.
+
+  Pliki               4 pliki o tej samej strukturze; czym się różnią —
+                      PDF nie mówi (okresy? scenariusze? obszary?).
+                      Format: CSV z 11 kolumnami albo NetCDF.
+
+  Kolumny CSV         W czatach wymienione: XLAT, XLONG, south_north,
+                      west_east, wysokość, u, v, ws, wdir, czas. Dokładny
+                      nagłówek 11 kolumn nie został zapisany.
+
+  Jednostki           Nie zapisane w czatach (należy oczekiwać m/s i °,
+                      ale sprawdzić w pliku).
+  -----------------------------------------------------------------------
+
+-   NIE USTALONO: punkt siatki dla farmy (propozycja: najbliższy
+    środkowi Baltica 2 albo średnia z punktów wewnątrz granicy;
+    uśredniać przez u/v, nie wdir).
+
+-   NIE USTALONO: który z 4 plików idzie do AEP.
+
+2.3 Alfa (prawo potęgowe)
+
+-   Do prędkości na piaście alfa nie jest potrzebna — bierzemy height ==
+    150.
+
+-   Do FLORIS potrzebna jako flow_field.wind_shear (rozkład prędkości na
+    wirniku, łopaty ok. 30–270 m). Dziś kod jej nie ustawia → FLORIS
+    bierze domyślne 0,12 (sprawdzone w default_inputs.yaml FLORIS
+    4.6.4). farm_model.py nadpisuje tylko reference_wind_height = 150.
+
+-   Plan: α z dopasowania ln(ws) do ln(z) na profilu 50–300 m dla
+    każdego kroku; do FLORIS jedna liczba (średnia lub mediana). Wartość
+    α dla danych — jeszcze niepoliczona.
+
+-   Gdyby była potrzebna inna wysokość (np. 180 m): lokalna α =
+    ln(U200/U150)/ln(200/150), U180 = U150·(180/150)^α. Interpolować
+    składowe u, v; kierunek liczyć na końcu.
+
+-   Nie mylić z „alpha (deflection)” = 0,58 w modelu GCH
+    (05_advanced_floris.py) — to parametr śladu.
+
+2.4 ERA5 od Klaudii (tylko testy)
+
+-   Folder Google Drive „ERA5data”:
+    https://drive.google.com/drive/folders/1BUekDvyChXlbHzYEcaX38guUoDblTgRV
+    (udostępniony 03.10.2026).
+
+-   ERA5_1940_2025_combined.zip (~7 GB), data_quality/ (CSV z kolumnami
+    variable, latitude, longitude, total_records, missing…, kilka
+    punktów siatki ~54–55°N), exploratory_data_analysis/.
+
+-   Zawartość zipa nie została sprawdzona. Wg czerwcowego slajdu
+    Klaudii: wiatr u/v 10 i 100 m, porywy, temperatura, ciśnienie,
+    gęstość, fale, opady, śnieg. Krok godzinowy.
+
+-   Ustalony w czacie okres bazowy do AEP z ERA5: 1995–2024.
+
+-   Obecny from_era5(): .values.flatten() miesza czas z punktami siatki;
+    nie obsługuje valid_time; ekstrapolacja log z0 = 0,0002 m (+3,1%
+    stałe).
+
+3. Algorytmy
+
+3.1 Benchmark z czerwca (prezentowany 11.06 i 26.10)
+
+Siatka 3 × 3 (9 × IEA 15 MW), jeden warunek 270° / 9 m/s, TI 0,06,
+budżet 100 ewaluacji, seed 42, min. odstęp i margines 3D.
+
+  -------------------------------------------------------------------------
+  Start             Algorytm      AEP [GWh]     Δ na binie    Czas
+  ----------------- ------------- ------------- ------------- -------------
+  7D                SLSQP         706,9         +55,7%        51,3 s
+
+  7D                GA            705,1         +55,3%        3,2 s
+
+  4D                SLSQP         647,2         +81,6%        38,9 s
+
+  4D                GA            706,7         +98,3%        3,2 s
+  -------------------------------------------------------------------------
+
+3.2 Ten sam benchmark przeliczony na pełnej róży (10.2026, potwierdzone 21.11.2026)
+
+  ------------------------------------------------------------------------
+  Start     Algorytm    Na binie 270°    Min. odstęp  Pełna róża vs siatka
+                                                      startowa
+  --------- ----------- ---------------- ------------ --------------------
+  7D        SLSQP       +55,8%           2,88D (łamie −1,06%
+                                         3D)          
+
+  7D        GA          +55,3%           3,00D        −1,87%
+
+  4D        SLSQP       +20,6% (429,7    0,00D        −15,92%
+                        GWh)             (turbiny na  
+                                         sobie)       
+
+  4D        GA          +98,3%           3,01D        +0,18%
+  ------------------------------------------------------------------------
+
+-   Wniosek: czerwcowy benchmark jest testem algorytmu, nie layoutu.
+    Optimum pod jeden kierunek nie jest optimum rocznym.
+
+-   SLSQP ze startu 4D daje dziś 429,7 GWh, w czerwcu 647,2 GWh.
+    Rozbieżność niewyjaśniona.
+
+-   „GA 16× szybszy” to nierówne porównanie: czas GA liczony po
+    ewaluacji populacji startowej; Scipy raportuje n_evaluations =
+    maxiter (50), a gradient liczony różnicami skończonymi.
+
+-   Maj: SLSQP (LayoutOptimizationScipy) dla 25 turbin — 1025 s.
+
+3.3 Hybryda GA → SLSQP i seedy
+
+-   Ustalone na kick-off 26.10 (M2, 18.12.2026): benchmark GA, SLSQP, GA
+    → SLSQP na pełnej róży, 5 seedów każdy, ten sam budżet ewaluacji.
+    Tabela: zysk AEP, czas, rozrzut między seedami, czy wynik spełnia
+    ograniczenia.
+
+-   Jeśli 107 turbin za drogie: benchmark na podzbiorze, wynik
+    weryfikowany na róży 10° × 2 m/s.
+
+-   Hybryda nie jest zaimplementowana. Szczegóły (podział budżetu
+    GA/SLSQP, kryterium przejścia): nie ustalono.
+
+-   AHGO (CMA-ES na ~8 parametrach geometrii → GA → SLSQP) był pomysłem
+    z kwietnia/maja; w majowej prezentacji zastąpiony ogólnym „hybrid
+    approach / multi-stage pipeline”. Nie jest zobowiązaniem.
+
+3.4 Parametry GA (src/algorithms/genetic.py)
+
+  ------------------------------------------------------------------------
+  Parametr            Domyślnie   Zakres w UI / uwagi
+  ------------------- ----------- ----------------------------------------
+  pop_size            20          6–60
+
+  mutation_rate       0,2         0–1; prawdopodobieństwo mutacji
+                                  współrzędnej
+
+  mutation_sigma_D    0,5         0,1–2,0 × D; siła mutacji gaussowskiej
+
+  n_elite             2           0–6
+
+  selekcja            turniej,    na stałe w kodzie
+                      rozmiar 3   
+
+  krzyżowanie         BLX-α, α =  na stałe w kodzie
+                      0,3         
+
+  eval_budget         100 (Lab)   pokolenia = (budżet − pop_size) /
+                                  pop_size
+
+  seed                42          do M2: 5 seedów
+
+  repair              —           wymusza min. odstęp i granice; po
+                                  naprawie przycięcie do granic może
+                                  ponownie złamać odstęp
+  ------------------------------------------------------------------------
+
+-   W repo jest Lab z 7 algorytmami (src/algorithms/): Scipy (SLSQP),
+    Random Search, GA, DE, SA, PSO, Greedy; wspólny interfejs
+    LayoutAlgorithm, parametry w PARAMS. Granice tylko prostokątne
+    (bounds_rect).
+
+-   random_feasible_layout() dla 107 turbin daje ten sam (i
+    niespełniający 3D) layout dla każdego seeda → GA/DE/PSO startują z
+    klonów. Potwierdzone 21.11.
+
+4. Co oddać innym grupom
+
++-------------+-------+--------------------------+----------+--------+
+| Plik        | Dla   | Kolumny / zawartość      | Rozdz    | Termin |
+|             |       |                          | ielczość | (obi   |
+|             |       |                          |          | ecany) |
++=============+=======+==========================+==========+========+
+| layout.csv  | T3,   | Dziś w kodzie:           | —        | bazowy |
+|             | T4    | turbine_id, x_m, y_m,    |          | 20.11  |
+|             | (f    | turbine_type (metry      |          | .2026; |
+|             | inał: | lokalne, brak CRS).      |          | f      |
+|             | wsz   |                          |          | inalny |
+|             | yscy) | Plan: id, x/y UTM 33N,   |          | 15.0   |
+|             |       | lat, lon, typ.           |          | 1.2027 |
++-------------+-------+--------------------------+----------+--------+
+| floris_     | T3,   | Pełna konfiguracja       | —        | 20.1   |
+| config.yaml | T4    | FLORIS (model wake,      |          | 1.2026 |
+|             |       | turbina, layout,         |          |        |
+|             |       | flow_field).             |          |        |
++-------------+-------+--------------------------+----------+--------+
+| aep_tim     | T5    | period, period_label,    | rok,     | w      |
+| eseries.csv |       | aep_gwh,                 | m        | stępny |
+|             |       | capacity_factor_pct,     | iesiące, | 18.12  |
+|             |       | wake_losses_pct,         | sezony   | .2026; |
+|             |       | n_turbines,              |          | f      |
+|             |       | turbine_type,            |          | inalny |
+|             |       | wake_model,              |          | 15.0   |
+|             |       | total_capacity_mw.       |          | 1.2027 |
+|             |       |                          |          |        |
+|             |       | Wiersze: annual,         |          |        |
+|             |       | month_01…month_12,       |          |        |
+|             |       | season_DJF/MAM/JJA/SON.  |          |        |
+|             |       | Jednostki: GWh, %.       |          |        |
++-------------+-------+--------------------------+----------+--------+
+| v(t) per    | T6    | Z tabeli Oskara:         | nie      | finał  |
+| turbina     | (O    | „wake-corrected v(t),    | ustalono | 15.0   |
+|             | skar) | CSV time, v [m/s]”;      |          | 1.2027 |
+|             |       | propozycja Timy: time,   |          | (      |
+|             |       | turbine_id, v. Źródło:   |          | format |
+|             |       | FLORIS                   |          | do     |
+|             |       | tur                      |          | uzgod  |
+|             |       | bine_average_velocities. |          | nienia |
+|             |       |                          |          | z T6)  |
++-------------+-------+--------------------------+----------+--------+
+| win         | p     | W planie z 26.10 (README | —        | 20.1   |
+| d_rose.csv, | aczka | z jednostkami i          |          | 1.2026 |
+| e           | M1    | źródłem). Po przejściu   |          |        |
+| ra5_hub_tim |       | na IMGW nazwa/zawartość  |          |        |
+| eseries.csv |       | nie ustalona.            |          |        |
++-------------+-------+--------------------------+----------+--------+
+| yaw_s       | T3    | Istnieje eksport w       | —        | —      |
+| chedule.csv |       | zakładce „Grupa 3”:      |          |        |
+|             |       | findex, turbine_id,      |          |        |
+|             |       | yaw_deg. Nie było        |          |        |
+|             |       | zobowiązania.            |          |        |
++-------------+-------+--------------------------+----------+--------+
+
+-   Wartości miesięczne i sezonowe w obecnym aep_timeseries.csv są
+    błędne (błąd #2) — nie wysyłać przed poprawką.
+
+-   Eksport T5 liczony na eval_wind; domyślny tryb aplikacji to wąski
+    bin (1 warunek × 8760 h). Eksport musi być zawsze z pełnej róży.
+
+-   T5 potrzebuje dodatkowo scenariuszy klimatycznych od T1 i
+    kosztów/obciążeń od T4 — nie od T2.
+
+-   T3 prosił o dane co 15 min — ani ERA5 (1 h), ani IMGW (3 h) tego nie
+    dają.
+
+-   v(t): 30 lat × 107 turbin ≈ 28 mln wartości; rozsądnie 1 rok albo
+    wybrane okresy.
+
+-   NIE USTALONO: format, krok i okres v(t) dla T6.
+
+-   NIE USTALONO: kierunek T4 ↔ T6 (czerwiec: T4 → T6; slajd Oskara: T6
+    → T4 daje T_aero(t)). Nie dotyczy T2 bezpośrednio.
+
+-   NIE USTALONO: czy paczka M1 (20.11) została faktycznie przekazana —
+    brak informacji w czatach.
+
+5. Uwagi prowadzących i obietnice
+
+5.1 Prowadzący
+
+-   Spotkanie 27.04.2026 (wnioski Timy z dyskusji): skupić się na
+    optymalizacji layoutu, nie na yaw; realny obszar na Bałtyku; lepszy
+    algorytm niż SLSQP; trasa kabli — ewentualnie faza końcowa.
+
+-   prof. P. Flaszyński, mail przed 18.05: materiał zaktualizowany o
+    wybraną lokalizację i turbinę; kto od kogo i jakich danych
+    potrzebuje.
+
+-   prof. P. Flaszyński, mail 06.2026: prezentacja obowiązkowa jako
+    forma zwięzłego przekazania wyników; na koniec semestru podsumowanie
+    działań i cele na kolejny semestr; ocena sem. 1 ujednolicona, liczy
+    się ocena końcowa po sem. 2.
+
+-   dr F. Wasilczuk, mail przed 26.10: recap, praca w wakacje, cele
+    SMART z min. 2 milestones z terminami i celem końcowym, wymagania
+    wobec innych podgrup precyzyjne i uzgodnione z terminem, wspólny
+    wykres Gantta przekazań.
+
+-   dr F. Wasilczuk (ok. 01.11): zwrócił uwagę na wykładnik alfa;
+    koleżanka z zespołu pracująca na IMGW miała notatki „alfa średnia
+    czy dla każdego kroku”, „south east”, „logarytmiczna 100–200”.
+    Odpowiedzi w sekcji 2.3.
+
+-   Inne uwagi prowadzących: nie zapisano w czatach.
+
+5.2 Obietnice Timy
+
+-   Kick-off 26.10, cel SMART: do 15.01.2027 zoptymalizowany layout 107
+    × IEA 15 MW w granicy Baltica 2, oceniony na pełnej róży wiatrów, z
+    AEP, CF i stratami wake porównanymi z siatką bazową. (Na slajdzie:
+    róża ERA5 — teraz IMGW.)
+
+-   M1, 20.11.2026: model Baltica 2 (realna granica, 107 turbin, róża
+    wiatrów) → bazowe AEP, CF, straty wake; zamrożony layout.csv + yaml
+    dla T3 i T4.
+
+-   M2, 18.12.2026: GA vs SLSQP vs GA → SLSQP, pełna róża, 5 seedów;
+    wstępne AEP dla T5.
+
+-   Finał, 15.01.2027: optymalny layout, layout.csv, aep_timeseries.csv
+    (miesięczne i sezonowe), v(t) dla T6.
+
+-   Fallback: jeśli dane T1 się spóźnią, własny import ERA5, żeby T3/T4
+    dostały layout 20.11.
+
+-   Maj i czerwiec: każdy wynik sprawdzany na dokładnej róży; kolejny
+    krok — pełna róża, realny obszar, kilka seedów, hybryda.
+
+6. Kod
+
+6.1 Stan repo
+
+  ------------------------------------------------------------------------
+  Branch         Ostatni      Zawartość
+                 commit       
+  -------------- ------------ --------------------------------------------
+  Ver3_Gr2+3     05.06.2026   Najnowszy. app.py 3666 linii, Lab 7
+                 79ae3e3      algorytmów, ERA5, 3D, raport PDF, role,
+                              prototyp three.js. Używać tego.
+
+  laptop1        24.05.2026   Stan „ERA5”, starszy.
+
+  Roboczy        15.04.2026   „+Benchmark”.
+
+  main           08.04.2026   Stare V1 (7 zakładek). Nie zmergowany — kto
+                              wejdzie na repo, widzi starą wersję.
+  ------------------------------------------------------------------------
+
+-   Pliki w projekcie claude.ai to snapshot z kwietnia — nieaktualne.
+    Aktualny kod jest na GitHubie.
+
+-   Po wakacjach nic nie zostało dopisane. Żadna poprawka z fazy 0 nie
+    jest w repo.
+
+6.2 Czego nie ma w repo
+
+-   from_imgw() — nie napisane (tylko specyfikacja z sekcji 2).
+
+-   from_era5_files() dla plików Klaudii — nie napisane.
+
+-   Wielokąt granicy (shapely), UTM (pyproj), wind_shear z danych,
+    eksport v(t) (turbine_average_velocities), hybryda GA → SLSQP,
+    sprawdzenie is_feasible() na wyniku algorytmów, podłączony
+    ParFlorisModel.
+
+-   test_parfloris.py wskazuje na nieistniejący inputs/gch.yaml i nie ma
+    if __name__ == "__main__".
+
+6.3 Błędy potwierdzone (stan na 21.11.2026)
+
+  --------------------------------------------------------------------------------------------
+  #   Gdzie                                      Problem i wynik testu
+  --- ------------------------------------------ ---------------------------------------------
+  1   wind_data.to_wind_rose(), ws_min=3,        Godziny < 3 m/s (8,7%) wypadają, częstości
+      ws_max=25                                  przeskalowane. Siatka 5×5 @ 7D: róża 1658,7
+                                                 GWh, szereg czasowy 1519,3 GWh (+9,2%); róża
+                                                 0–36 m/s: 1516,0 GWh. CF z README 50,8% →
+                                                 realnie ok. 46%.
+
+  2   aep_calculator.compute_monthly_aep(),      Każdy miesiąc/sezon liczony jak cały rok;
+      compute_seasonal_aep()                     fraction liczone, ale nieużyte. Suma sezonów
+                                                 6736 GWh, miesięcy 20 209,3 GWh, rok 1658,7
+                                                 GWh.
+
+  3   zakładka Eksport, export_for_team5()       Roczne AEP na eval_wind; domyślnie wąski bin.
+
+  4   Lab, wąski bin 270°/9 m/s                  Patrz 3.2.
+
+  5   algorithms/scipy_gradient.py               Brak kontroli ograniczeń wyniku (0,00D).
+
+  6   algorithms/base.random_feasible_layout()   107 turbin: identyczny layout dla 5 seedów,
+                                                 żaden nie spełnia 3D.
+
+  7   aep_calculator.compute_uncertain_aep()     wd_sample_points stałe −5…+5°, niezależne od
+                                                 wd_std (FLORIS domyślnie ±2σ).
+  --------------------------------------------------------------------------------------------
+
+Pozostałe z przeglądu: TI 0.12 × ws10/ws100 (≈0,10–0,11, za wysokie dla
+offshore); gęstość nieustawiana (1,225); plot_flow_field() nie przywraca
+danych wiatrowych; klucz cache AEP (_config_key) bez rozdzielczości róży
+i parametrów layoutu; @st.cache_resource na farmie wspólny dla sesji;
+hasła admin / digiwind2025 w app.py i publicznym README; floris>=4.4 bez
+górnej granicy.
+
+6.4 Pułapki środowiska
+
+-   Po zmianie w src/ usunąć src/__pycache__/ i zrestartować kernel.
+
+-   RandomSearch i ParFlorisModel wieszają się w Jupyterze na Windows
+    (multiprocessing) — uruchamiać ze skryptu z __main__.
+
+-   Zgodność modeli: Jensen + jimenez + crespo_hernandez; TurbOPark
+    wymaga deflection = none; empirical_gauss wymaga
+    wake_induced_mixing; flagi GCH wyłączyć dla innych modeli.
+
+-   disable_turbines z WindRose pokazuje 0% strat — obejście: derating
+    do 0 MW.
+
+-   Jeśli site-packages to symlink do dist-packages, FLORIS zgłasza
+    „iea_15MW exists in both the internal and external turbine library”
+    — uruchamiać z PYTHONPATH=…/dist-packages.
+
+6.5 Kod tylko z czatów
+
+Jedyny kod, który powstał w czatach i nie trafił do repo, to dwa skrypty
+testowe z czatu „Prezentacja na jutro” (26.10.2026). Odtworzyłem je w
+całości i uruchomiłem 21.11.2026 na Ver3_Gr2+3 — dają wyniki z tabel 3.2
+i 6.3. Uruchomienie: python tests/t1.py <ścieżka_do_repo>.
+
+Skrypt tests/t1.py — błąd #1 i #2 (róża vs szereg czasowy, suma
+miesięcy/sezonów):
+
+import sys, logging, numpy as np, time
+
+sys.path.insert(0, sys.argv[1])
+
+logging.disable(logging.WARNING)
+
+from src.wind_data import WindDataLoader
+
+from src.farm_model import FarmModel
+
+from src.aep_calculator import AEPCalculator
+
+L = WindDataLoader(); ts = L.generate_mock_data()
+
+print("mock mean ws", L.wind_speeds.mean().round(2), "frac<3:",
+(L.wind_speeds<3).mean().round(3), "frac>25:",
+(L.wind_speeds>25).mean().round(4))
+
+wr = L.to_wind_rose()
+
+print("WindRose freq sum:", wr.freq_table.sum().round(4), "ws centers",
+wr.wind_speeds)
+
+farm = FarmModel("gch","iea_15MW"); farm.set_layout_grid(5,5,7.0)
+
+farm.set_wind_data(wr); farm.run(); a_rose=farm.get_aep_gwh()
+
+# reference: full time series AEP (each hour 1/N)
+
+farm.set_wind_data(ts); farm.run()
+
+P = farm.fmodel.get_farm_power() # W per hour
+
+a_ts = np.nansum(P)/len(P)*8760/1e9
+
+print(f"AEP rose(3-25 bins)={a_rose:.1f} AEP timeseries exact={a_ts:.1f}
+diff={100*(a_rose/a_ts-1):+.1f}%")
+
+wr2 = L.to_wind_rose(ws_min=0.0, ws_max=36.0)
+
+print("rose 0-36 freq sum", wr2.freq_table.sum().round(4))
+
+farm.set_wind_data(wr2); farm.run(); print(f"AEP
+rose(0-36)={farm.get_aep_gwh():.1f}")
+
+# seasonal / monthly
+
+farm.set_wind_data(wr)
+
+calc = AEPCalculator(farm)
+
+s = calc.compute_seasonal_aep(L); m = calc.compute_monthly_aep(L)
+
+print(s[["season","n_hours","fraction","aep_gwh"]].round(1).to_string())
+
+print("sum seasonal aep:", s.aep_gwh.sum().round(1), " sum monthly
+aep:", m.aep_gwh.sum().round(1), " annual:", round(a_rose,1))
+
+Skrypt tests/t2.py — GA vs SLSQP: wąski bin vs pełna róża, ograniczenia,
+różnorodność losowych layoutów dla 107 turbin (ok. 5 min):
+
+import sys, logging, numpy as np, time, warnings
+
+warnings.filterwarnings("ignore")
+
+sys.path.insert(0, sys.argv[1]); logging.disable(logging.WARNING)
+
+from scipy.spatial.distance import pdist
+
+from floris import TimeSeries
+
+from src.farm_model import FarmModel
+
+from src.wind_data import WindDataLoader
+
+from src.algorithms import ALGORITHMS, bounds_from_layout
+
+from src.algorithms.base import random_feasible_layout, is_feasible
+
+D=240.
+
+def mk(sp, wind):
+
+f=FarmModel("gch","iea_15MW"); f.set_layout_grid(3,3,sp);
+f.set_wind_data(wind); return f
+
+narrow = TimeSeries(wind_directions=np.array([270.]),
+wind_speeds=np.array([9.]), turbulence_intensities=np.array([.06]))
+
+L=WindDataLoader(); L.generate_mock_data();
+rose=L.to_wind_rose(ws_min=0, ws_max=36)
+
+for sp in (7.0,4.0):
+
+for key in ("scipy","genetic"):
+
+f=mk(sp,narrow); b=bounds_from_layout(f.layout_x,f.layout_y,3*D); md=3*D
+
+r=ALGORITHMS[key]().run(f,b,md,100,seed=42)
+
+dmin=pdist(np.column_stack([r.final_x,r.final_y])).min()/D
+
+# re-evaluate final layout on full rose vs initial
+
+g=mk(sp,rose); g.run(); a0=g.get_aep_gwh();
+g.set_layout_custom(r.final_x,r.final_y); g.run(); a1=g.get_aep_gwh()
+
+print(f"start {sp}D {key:8s} narrow:
+{r.initial_aep:.1f}->{r.final_aep:.1f} ({r.improvement_pct:+.1f}%)
+t={r.elapsed_s:.1f}s evals={r.n_evaluations} | minDist={dmin:.2f}D
+feasible={is_feasible(r.final_x,r.final_y,b,md)} | FULL ROSE:
+{a0:.1f}->{a1:.1f} ({100*(a1/a0-1):+.2f}%)")
+
+# random_feasible_layout diversity for 107 turbines
+
+b=(0,0,25000,8000); md=3*D
+
+lays=[random_feasible_layout(107,b,md,seed=s) for s in range(5)]
+
+print("107T: identical across seeds:", all(np.allclose(lays[0][0],l[0])
+for l in lays), " feasible:", [is_feasible(x,y,b,md) for x,y in
+lays][:3])
+
+7. Otwarte sprawy / do zrobienia
+
+7.1 Do ustalenia z ludźmi
+
+-   Dokładny wielokąt Baltica 2 i strefy wyłączone.
+
+-   Który plik IMGW (z 4) i czym się różnią; punkt siatki; nagłówek,
+    jednostki, format daty.
+
+-   107 turbin stałe czy optymalizowane; minimalny rozstaw.
+
+-   Format v(t) z Oskarem (T6); potwierdzenie, czy M1 (20.11) poszedł do
+    T3/T4.
+
+-   Czy czerwcowe 647,2 GWh SLSQP spełniało min. odstęp (dziś ten sam
+    przypadek daje 0,00D).
+
+7.2 Faza 0 — poprawki (planowane 27.10–02.11, niezrobione)
+
+-   Biny róży od 0 m/s do maks. prędkości (to_wind_rose,
+    to_wind_ti_rose). Test: róża vs szereg czasowy < 1%.
+
+-   AEP miesięczne/sezonowe jako energia (suma P(t)·Δt w miesiącu /
+    liczba lat, albo AEP × udział godzin). Test: suma 12 miesięcy = rok.
+
+-   Eksport T5 i zakładka Ekonomia zawsze na pełnej róży; domyślny tryb
+    aplikacji: pełna róża.
+
+-   is_feasible() na wyniku każdego algorytmu; poprawny pomiar czasu GA
+    i liczby ewaluacji SLSQP.
+
+-   wd_sample_points jako wielokrotności wd_std; klucz cache AEP;
+    plot_flow_field() przywraca wiatr.
+
+-   Hasła do secrets.toml (i do .gitignore), usunąć z README, zmienić na
+    Streamlit Cloud; floris==4.6.4; merge Ver3_Gr2+3 do main.
+
+-   Przeliczyć wyniki z wcześniejszych prezentacji (AEP 5×5, CF, wake
+    losses) i opisać korektę w raporcie.
+
+7.3 Faza 1 — model Baltica 2 na IMGW (M1, termin 20.11 minął)
+
+-   WindDataLoader.from_imgw(): wybór pliku, punktu siatki, height ==
+    150, cftime, TI stałe 0,06.
+
+-   α z profilu 50–300 m → flow_field.wind_shear; walidacja (średnia
+    prędkość, Weibull, róża).
+
+-   Wielokąt lat/lon → UTM 33N; bazowy layout 107 × IEA 15 MW w
+    wielokącie (siatka obrócona do dominującego kierunku).
+
+-   AEP, CF, straty wake: GCH vs TurbOPark vs Empirical Gauss;
+    wrażliwość na TI 0,04–0,10.
+
+-   Paczka dla T3/T4: layout.csv (z lat/lon), floris_config.yaml, róża
+    wiatrów, README z jednostkami i źródłem.
+
+7.4 Faza 2 — optymalizacja (M2, 18.12.2026)
+
+-   Ograniczenia z wielokąta (shapely: punkt w wielokącie + odległość do
+    granicy).
+
+-   Populacja startowa dla 107 turbin: perturbacje layoutu bazowego +
+    Poisson disk w wielokącie.
+
+-   Lab na pełnej róży: szukanie 30°/3 m/s, ocena 10°/2 m/s; równoległa
+    ewaluacja ze skryptu.
+
+-   Implementacja hybrydy GA → SLSQP; benchmark 3 metod × 5 seedów, ten
+    sam budżet.
+
+-   Wstępny, poprawiony aep_timeseries.csv dla T5.
+
+7.5 Faza 3 — finał (15.01.2027)
+
+-   AEP bazowego i finalnego layoutu z szeregu czasowego (rocznikami).
+
+-   v(t) dla T6; końcowe layout.csv, aep_timeseries.csv, README.
+
+-   Raport i prezentacja końcowa z poprawionymi liczbami.
