@@ -845,7 +845,9 @@ class FarmModel:
 
     def get_aep_per_turbine_gwh(self) -> np.ndarray:
         """Zwraca AEP per turbina w GWh."""
-        return self._fmodel.get_turbine_AEPs() / 1e9
+        # FLORIS 4.x nie ma get_turbine_AEPs(): oczekiwana moc (ważona
+        # częstościami róży / szeregu) × 8760 h
+        return self._fmodel.get_expected_turbine_powers() * 8760.0 / 1e9
 
     def get_turbine_powers_mw(self) -> np.ndarray:
         """Zwraca moce turbin [MW] dla wszystkich warunków wiatrowych."""
